@@ -1,0 +1,51 @@
+# Checks on every pull request and on every push to main.
+
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          # The same version as go.mod, so CI checks what a developer builds.
+          go-version-file: go.mod
+
+      # go.mod must not list any module (requirement S-2).
+      - name: standard library only
+        run: |
+          if grep -q '^require' go.mod; then
+            echo "go.mod lists a module; S-2 allows the standard library only" >&2
+            exit 1
+          fi
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "not formatted:" >&2
+            echo "$out" >&2
+            exit 1
+          fi
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+      - name: pre-push hook
+        run: tests/pre-push.test.sh

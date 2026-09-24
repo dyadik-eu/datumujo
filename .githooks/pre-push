@@ -1,0 +1,45 @@
+#!/bin/sh
+# Reject pushes directly to main.
+#
+# Every change goes through a branch and a pull request, so CI runs before
+# anything lands on main. GitHub branch protection would be the right place
+# for this rule, but it is not available for private repositories on this
+# account (the rules API answers 403). So the rule lives here.
+#
+# Enable once per clone:
+#
+#     git config core.hooksPath .githooks
+#
+# Bypass on purpose with `git push --no-verify`. A hook is a reminder, not
+# a wall.
+
+main_ref="refs/heads/main"
+
+while read -r _local_ref _local_sha remote_ref remote_sha; do
+    [ "$remote_ref" = "$main_ref" ] || continue
+
+    # A remote SHA of only zeros means main does not exist on the remote
+    # yet. The very first push of a new repository creates it, and there is
+    # nothing a pull request could target before that, so it is allowed.
+    # The length depends on the hash function (40 for SHA-1, 64 for
+    # SHA-256), hence a pattern instead of a fixed string.
+    case "$remote_sha" in
+        *[!0]*) ;;
+        "") ;;
+        *) exit 0 ;;
+    esac
+
+    echo "pre-push: direct push to main rejected." >&2
+    echo >&2
+    echo "  Work on a branch and open a pull request:" >&2
+    echo >&2
+    echo "    git switch -c <type>/<short-description>" >&2
+    echo "    git push -u origin HEAD" >&2
+    echo "    gh pr create --fill" >&2
+    echo >&2
+    echo "  <type> is a Conventional Commits type: fix, feat, docs," >&2
+    echo "  refactor, perf, test, chore, ci." >&2
+    exit 1
+done
+
+exit 0

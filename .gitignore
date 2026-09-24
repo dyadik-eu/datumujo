@@ -1,0 +1,4 @@
+# Test and fuzz output. Nothing a run produces is committed.
+/testdata/fuzz/*/cache/
+*.test
+*.out
