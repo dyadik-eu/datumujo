@@ -157,6 +157,24 @@ func (s *Sim) Remove(name string) error {
 	return nil
 }
 
+// Rename moves the file, with what is durable and what is pending in it,
+// to the new name. The rename itself is durable at once, as OS.Rename
+// makes it with fsync on the directory.
+func (s *Sim) Rename(oldName, newName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.spend(); err != nil {
+		return err
+	}
+	f, ok := s.files[oldName]
+	if !ok {
+		return fmt.Errorf("vfs: rename %s: no such file", oldName)
+	}
+	delete(s.files, oldName)
+	s.files[newName] = f
+	return nil
+}
+
 func (s *Sim) Exists(name string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

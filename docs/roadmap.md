@@ -11,6 +11,7 @@ The design is in [design.md](design.md).
 | 3 | Page format: header page, checksum trailer, format version, errors that name the page; fuzz test of the reader | I-1, I-4, P-2 (pages) |
 | 4 | Log: frames, commit records with chained checksums, recovery on open; crash test at page level | T-3, T-4, D-1, P-1 (pages) |
 | 5 | Snapshots and checkpoint: readers that do not block, one writer, checkpoint only where no reader needs the old page | T-2, T-5, D-2 |
+| 5a | Exclusive lock on the file at Open, on the operating system and on the simulated disk | S-1 |
 | 6 | B+tree over pages: byte keys and values, get, put, delete, scans in both directions, free pages; tested against a map as oracle; crash test with the tree | M-4 (bytes), P-1 (tree) |
 | 7 | Page size: measure with the load of P-5 and set the value for new files | Q-2 |
 | 8 | Typed tables: schema in the file, column types, null, row encoding, primary key, schema changes with a version | M-1, M-7 |

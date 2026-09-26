@@ -112,6 +112,25 @@ func TestNamesBehaveLikeOS(t *testing.T) {
 		if ok, err := c.fs.Exists(c.name); !ok || err != nil {
 			t.Errorf("%T: exists after open: %v %v", c.fs, ok, err)
 		}
+		// Rename to a new name and back over an existing file.
+		other := c.name + "2"
+		if err := c.fs.Rename(c.name, other); err != nil {
+			t.Errorf("%T: rename: %v", c.fs, err)
+		}
+		if ok, _ := c.fs.Exists(c.name); ok {
+			t.Errorf("%T: old name exists after rename", c.fs)
+		}
+		g, _ := c.fs.Open(c.name) // a new, empty file under the old name
+		g.Close()
+		if err := c.fs.Rename(other, c.name); err != nil {
+			t.Errorf("%T: rename over an existing file: %v", c.fs, err)
+		}
+		if ok, _ := c.fs.Exists(other); ok {
+			t.Errorf("%T: %s exists after renaming it away", c.fs, other)
+		}
+		if err := c.fs.Rename(other, c.name); err == nil {
+			t.Errorf("%T: renaming a missing file succeeded", c.fs)
+		}
 		if err := c.fs.Remove(c.name); err != nil {
 			t.Errorf("%T: remove: %v", c.fs, err)
 		}

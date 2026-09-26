@@ -49,7 +49,7 @@ func read(t *testing.T, l *Log, nos []uint64) state {
 	st.count, _ = l.Count()
 	buf := make([]byte, ps)
 	for _, no := range nos {
-		ok, err := l.Read(no, buf)
+		ok, err := l.Read(no, l.Last(), buf)
 		if err != nil {
 			t.Fatalf("read page %d: %v", no, err)
 		}
@@ -420,5 +420,95 @@ func TestFailedCommitLeavesNoTail(t *testing.T) {
 	got := read(t, l2, allPages)
 	if _, ok := got.pages[2]; ok || got.pages[5] != string(img(5, 1)) {
 		t.Errorf("after a failed commit: %v", got)
+	}
+}
+
+// TestReadAtAnOlderCommit: a reader of commit n sees each page as the
+// commits up to n left it, not as later ones did.
+func TestReadAtAnOlderCommit(t *testing.T) {
+	l, _ := open(t, vfs.NewSim())
+	l.Commit([]Page{{1, img(1, 1)}, {2, img(2, 1)}}, 3) // commit 1
+	l.Commit([]Page{{1, img(1, 2)}}, 3)                 // commit 2
+	l.Commit([]Page{{2, img(2, 3)}}, 3)                 // commit 3
+	buf := make([]byte, ps)
+	for _, c := range []struct {
+		no   uint64
+		upTo int
+		tag  int // 0: no image
+	}{{1, 0, 0}, {1, 1, 1}, {1, 2, 2}, {1, 3, 2}, {2, 1, 1}, {2, 2, 1}, {2, 3, 3}} {
+		ok, err := l.Read(c.no, c.upTo, buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.tag == 0 {
+			if ok {
+				t.Errorf("page %d up to commit %d: an image, want none", c.no, c.upTo)
+			}
+			continue
+		}
+		if !ok || string(buf) != string(img(c.no, c.tag)) {
+			t.Errorf("page %d up to commit %d: want version %d", c.no, c.upTo, c.tag)
+		}
+	}
+}
+
+// TestNumbersGoOnAfterReset: after Reset the next commit gets the next
+// number. A reader of an earlier commit does not see it, and finds no
+// image of the old generation either.
+func TestNumbersGoOnAfterReset(t *testing.T) {
+	l, _ := open(t, vfs.NewSim())
+	l.Commit([]Page{{1, img(1, 1)}}, 2)
+	l.Commit([]Page{{1, img(1, 2)}}, 2)
+	if err := l.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if l.Last() != 2 || l.Commits() != 0 {
+		t.Fatalf("after reset: last %d, commits %d", l.Last(), l.Commits())
+	}
+	l.Commit([]Page{{1, img(1, 3)}}, 2) // commit 3
+	buf := make([]byte, ps)
+	if ok, _ := l.Read(1, 2, buf); ok {
+		t.Error("a reader of commit 2 sees an image after the reset")
+	}
+	if ok, _ := l.Read(1, 3, buf); !ok || string(buf) != string(img(1, 3)) {
+		t.Error("commit 3 not readable")
+	}
+}
+
+func TestNewest(t *testing.T) {
+	l, _ := open(t, vfs.NewSim())
+	l.Commit([]Page{{3, img(3, 1)}, {1, img(1, 1)}}, 4)
+	l.Commit([]Page{{1, img(1, 2)}}, 4)
+	var got []string
+	l.Newest(func(no uint64, p []byte) error {
+		got = append(got, fmt.Sprintf("%d:%s", no, bytes.TrimRight(p[:30], "\x00")))
+		return nil
+	})
+	want := []string{"1:page 1 version 2", "3:page 3 version 1"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("newest: %v, want %v", got, want)
+	}
+}
+
+// TestDamageAfterOpenIsFound: an image damaged in the log file after Open
+// is not handed out, neither to a reader nor to a checkpoint through
+// Newest, which would copy it into the database file.
+func TestDamageAfterOpenIsFound(t *testing.T) {
+	s := vfs.NewSim()
+	l, _ := open(t, s)
+	l.Commit([]Page{{1, img(1, 1)}}, 2)
+	f, _ := s.Open("log")
+	off := int64(headerSize + frameHeaderSize + 7)
+	b := make([]byte, 1)
+	f.ReadAt(b, off)
+	b[0] ^= 0x10
+	f.WriteAt(b, off)
+	if _, err := l.Read(1, l.Last(), make([]byte, ps)); !errors.Is(err, page.ErrDamaged) {
+		t.Errorf("Read: %v", err)
+	}
+	copied := 0
+	err := l.Newest(func(uint64, []byte) error { copied++; return nil })
+	if !errors.Is(err, page.ErrDamaged) || copied != 0 {
+		t.Errorf("Newest: %v, %d pages handed out", err, copied)
 	}
 }
