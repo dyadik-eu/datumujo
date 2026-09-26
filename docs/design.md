@@ -194,6 +194,54 @@ A node is decoded, changed and encoded again for every change. The decoder
 checks each length against the page. It accepts only the shortest form of a
 number. So it returns an error on content that this code does not write.
 
+## Tables
+
+A table is a tree. Its key is the primary key of a row, its value holds
+the other columns. The schema lists the tables with their columns, key
+and root page. It is one record in a catalog tree at root slot 0. Each
+schema change writes the record again with the next version number, in the
+same transaction as the rows. A rollback removes both.
+
+Column types are int64, float64, bool, string, bytes and time. Go values
+of exactly these types are accepted; an `int` for an int64 column is an
+error. A string must be UTF-8. A key column cannot allow null.
+
+The key form keeps the order of the values, so a scan in key order is a
+scan in value order:
+
+| Type | Key form |
+|---|---|
+| int64 | 8 bytes big-endian, sign bit flipped |
+| float64 | 8 bytes: sign bit set for a positive number, all bits flipped for a negative one |
+| bool | one byte, 0 or 1 |
+| string, bytes | the bytes, each 0x00 as 0x00 0xFF, then 0x00 0x01 |
+| time | seconds as int64 key form, then nanoseconds as 4 bytes big-endian |
+
+The end mark 0x00 0x01 sorts below every other byte after 0x00. So a
+string sorts before each longer string it starts. A key over two columns
+keeps the order of the first column.
+
+Three values change on the way through a key:
+
+* A float key of -0 is stored as +0. The two are equal, and one key must
+  not have two forms.
+* NaN is rejected in a key. It has no place in the order.
+* A time comes back in UTC. The instant is kept, the location is not.
+
+Outside the key, a float keeps its bits, NaN and -0 included, and a time
+keeps its instant.
+
+A stored row starts with the number of columns outside the key. A bitmap
+follows, with one bit for each null. Then come the values that are not
+null. A column added later
+must allow null. A row written before it has fewer columns, and the
+missing ones read as null. So adding a column rewrites no row.
+
+The decoders of keys, rows and the schema accept only what the encoders
+write. Numbers are in their shortest form. No bit is set past the last
+column, and no byte follows the end. A fuzz test checks for each decoder that an input it
+accepts encodes to the same bytes.
+
 ## One process, one writer
 
 The database runs in one process (S-1). Inside the process, one write
