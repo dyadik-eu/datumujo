@@ -25,6 +25,7 @@ const SectorSize = 512
 type Sim struct {
 	mu      sync.Mutex
 	files   map[string]*simFile
+	locks   map[string]bool
 	budget  int // calls left; negative means no limit
 	calls   int
 	crashed bool
@@ -48,7 +49,37 @@ type op struct {
 
 // NewSim returns an empty disk without a call budget.
 func NewSim() *Sim {
-	return &Sim{files: map[string]*simFile{}, budget: -1}
+	return &Sim{files: map[string]*simFile{}, locks: map[string]bool{}, budget: -1}
+}
+
+// Lock takes the lock on name. A disk after Crash has no locks: the
+// process that held them is gone. The lock is not a change to the disk,
+// so it does not use up the budget; creating the file does.
+func (s *Sim) Lock(name string) (func() error, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.crashed {
+		return nil, ErrCrashed
+	}
+	if s.locks[name] {
+		return nil, ErrLocked
+	}
+	if _, ok := s.files[name]; !ok {
+		if err := s.spend(); err != nil {
+			return nil, err
+		}
+		s.files[name] = &simFile{}
+	}
+	s.locks[name] = true
+	var once sync.Once
+	return func() error {
+		once.Do(func() {
+			s.mu.Lock()
+			delete(s.locks, name)
+			s.mu.Unlock()
+		})
+		return nil
+	}, nil
 }
 
 // SetBudget lets n more changing calls succeed; later calls return

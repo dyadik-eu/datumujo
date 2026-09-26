@@ -102,8 +102,12 @@ The database runs in one process (S-1). Inside the process, one write
 transaction at a time holds the writer lock, and a checkpoint takes it too.
 Readers take no lock.
 
-Not built yet: an exclusive lock on the file at Open, so that a second
-process cannot open the database at the same time. It comes before step 6.
+Open takes an exclusive lock on a file with the suffix "-lock" before it
+reads anything. A second Open of the same database fails until Close, in
+another process and in the same one. On the operating system the lock is
+flock(2), and the kernel releases it when the process ends. The lock is on
+a file of its own, because creating a database renames a new file over the
+old name.
 
 ## All file access goes through one interface
 

@@ -30,6 +30,7 @@ type Options struct {
 
 // Store is an open database file with its log.
 type Store struct {
+	unlock   func() error
 	db       vfs.File
 	logf     vfs.File
 	log      *wal.Log
@@ -48,8 +49,20 @@ type Store struct {
 var ErrClosed = errors.New("store: closed")
 
 // Open opens the database in the file name of fs, with its log in
-// name+"-log". If the file does not exist, Open creates it.
-func Open(fs vfs.FS, name string, opt Options) (*Store, error) {
+// name+"-log". If the file does not exist, Open creates it. It takes an
+// exclusive lock on name+"-lock" first, so a second Open of the same
+// database fails with vfs.ErrLocked until Close, in this process or
+// another one (S-1).
+func Open(fs vfs.FS, name string, opt Options) (s *Store, err error) {
+	unlock, err := fs.Lock(name + "-lock")
+	if err != nil {
+		return nil, fmt.Errorf("store: %s: %w", name, err)
+	}
+	defer func() {
+		if err != nil {
+			unlock()
+		}
+	}()
 	exists, err := fs.Exists(name)
 	if err != nil {
 		return nil, err
@@ -63,11 +76,12 @@ func Open(fs vfs.FS, name string, opt Options) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err := open(fs, name, db)
+	s, err = open(fs, name, db)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
+	s.unlock = unlock
 	return s, nil
 }
 
@@ -186,6 +200,9 @@ func (s *Store) Close() error {
 	s.mu.Unlock()
 	err := s.logf.Close()
 	if e := s.db.Close(); err == nil {
+		err = e
+	}
+	if e := s.unlock(); err == nil {
 		err = e
 	}
 	return err
