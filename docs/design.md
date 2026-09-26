@@ -111,9 +111,65 @@ A freed page can be reused in the next commit at once. A snapshot of an
 earlier commit still reads its old content from the log or from the file.
 No checkpoint changes the file while that snapshot is open.
 
-The page size is a field of the header. The value for new files is decided
-after a measurement with the load of P-5 (Q-2). Until then the tests run with
-more than one size.
+The page size is a field of the header. New files get 4096 bytes. The tests
+run with more than one size.
+
+## Page size
+
+The value for new files comes from a measurement with the load of P-5
+(Q-2). `internal/load` loads the issues, pull requests and comments of
+in-toto/in-toto-golang and in-toto/in-toto into four trees. It runs only
+with `DATUMUJO_LOAD` set; its package comment has the commands that fetch
+the data.
+
+The data, fetched on 26.09.2026:
+
+| | in-toto-golang | in-toto |
+|---|---|---|
+| issues | 83 | 177 |
+| pull requests | 390 | 775 |
+| issue comments | 1064 | 2159 |
+| review comments | 810 | 2460 |
+
+9343 rows, 13.4 MB of keys and values. 16 comments belong to in-toto #380.
+The API does not return this pull request any more, so a prefix scan cannot
+find them. The test counts them apart.
+
+Environment: Go 1.26.5, darwin/arm64, Apple M1 Pro, 16 GiB, macOS 27.0,
+APFS, commit a132fc3. Each time is the median of three runs. A commit holds
+100 rows. The load ends with a checkpoint.
+
+| page size | file | pages | overflow | depth | load | get all issues | comments by prefix | full scan |
+|---|---|---|---|---|---|---|---|---|
+| 1024 | 16.7 MiB | 17060 | 16037 | 4 | 633ms | 11.1ms | 23.9ms | 15.0ms |
+| 2048 | 18.5 MiB | 9496 | 8376 | 3 | 647ms | 11.8ms | 24.8ms | 12.3ms |
+| 4096 | 20.5 MiB | 5235 | 4090 | 3 | 639ms | 16.4ms | 34.5ms | 11.2ms |
+| 8192 | 22.8 MiB | 2911 | 1994 | 3 | 618ms | 18.4ms | 47.2ms | 11.4ms |
+| 16384 | 25.2 MiB | 1609 | 911 | 2 | 624ms | 24.1ms | 63.3ms | 11.0ms |
+
+What the numbers show:
+
+* The load takes the same time at every size. A CPU profile puts it in the
+  writes and syncs of the commits.
+* Most pages are overflow pages: bodies and diff hunks. The last page of
+  each chain is partly empty, so the file grows with the page size.
+* Lookups and prefix scans get slower as pages grow, although the tree gets
+  flatter. There is no page cache. Each node read is one pread of a whole
+  page, and in the profile the pread takes 36 % of all CPU time. A larger
+  page costs more per read.
+
+Why 4096 and not 2048, which reads about 30 % faster here:
+
+* The key limit follows from the page size. It is 232 bytes at 1024, 488 at
+  2048 and 1000 at 4096. An index key holds the indexed value and the
+  primary key. 488 bytes leave little room for a name and a path.
+* The read cost measures the read path without a cache. A page cache turns
+  it around: a flatter tree then needs fewer reads and fewer cached pages.
+* 4096 is the page size of the operating system on linux/amd64. It is also
+  the size that SSDs and file systems write in one piece.
+
+The measurement is repeated with the load test of step 12. If the engine
+gets a page cache, it is repeated then as well.
 
 ## The tree
 
