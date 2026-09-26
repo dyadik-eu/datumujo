@@ -20,6 +20,7 @@ The design is in [design.md](design.md).
 | 10a | Log: tell a damaged frame from a commit that did not finish; refuse to open a damaged log instead of cutting it | I-1, T-4, P-3 (log) |
 | 11 | Backup while writes go on, restore | O-1, O-2 |
 | 12 | Load test with the metadata of the in-toto repositories; memory bound per transaction | P-5, D-3 |
+| 13 | Public API at the root of the module; checkpoint by log size | use by abelejo |
 
 After step 12, abelejo uses datumujo for the metadata of its forge (phase 3
 of its plan).

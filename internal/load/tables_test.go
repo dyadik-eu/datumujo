@@ -10,51 +10,48 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dyadik-eu/datumujo/internal/backup"
-	"github.com/dyadik-eu/datumujo/internal/check"
+	"github.com/dyadik-eu/datumujo"
 	"github.com/dyadik-eu/datumujo/internal/store"
-	"github.com/dyadik-eu/datumujo/internal/table"
-	"github.com/dyadik-eu/datumujo/internal/vfs"
 )
 
 // The tables of the load test, as a forge keeps them.
-var loadDefs = []table.Def{
-	{Name: "issue", Columns: []table.Column{
-		{Name: "repo", Type: table.Int64},
-		{Name: "number", Type: table.Int64},
-		{Name: "pr", Type: table.Bool},
-		{Name: "title", Type: table.String},
-		{Name: "body", Type: table.String, Null: true},
-		{Name: "state", Type: table.String},
-		{Name: "author", Type: table.String},
-		{Name: "created", Type: table.Time},
-		{Name: "updated", Type: table.Time},
-		{Name: "closed", Type: table.Time, Null: true},
-		{Name: "labels", Type: table.String, Null: true},
+var loadDefs = []datumujo.Def{
+	{Name: "issue", Columns: []datumujo.Column{
+		{Name: "repo", Type: datumujo.Int64},
+		{Name: "number", Type: datumujo.Int64},
+		{Name: "pr", Type: datumujo.Bool},
+		{Name: "title", Type: datumujo.String},
+		{Name: "body", Type: datumujo.String, Null: true},
+		{Name: "state", Type: datumujo.String},
+		{Name: "author", Type: datumujo.String},
+		{Name: "created", Type: datumujo.Time},
+		{Name: "updated", Type: datumujo.Time},
+		{Name: "closed", Type: datumujo.Time, Null: true},
+		{Name: "labels", Type: datumujo.String, Null: true},
 	}, Key: []string{"repo", "number"}},
-	{Name: "comment", Columns: []table.Column{
-		{Name: "repo", Type: table.Int64},
-		{Name: "number", Type: table.Int64},
-		{Name: "id", Type: table.Int64},
-		{Name: "author", Type: table.String},
-		{Name: "body", Type: table.String},
-		{Name: "created", Type: table.Time},
-		{Name: "updated", Type: table.Time},
+	{Name: "comment", Columns: []datumujo.Column{
+		{Name: "repo", Type: datumujo.Int64},
+		{Name: "number", Type: datumujo.Int64},
+		{Name: "id", Type: datumujo.Int64},
+		{Name: "author", Type: datumujo.String},
+		{Name: "body", Type: datumujo.String},
+		{Name: "created", Type: datumujo.Time},
+		{Name: "updated", Type: datumujo.Time},
 	}, Key: []string{"repo", "number", "id"}},
-	{Name: "review", Columns: []table.Column{
-		{Name: "repo", Type: table.Int64},
-		{Name: "number", Type: table.Int64},
-		{Name: "id", Type: table.Int64},
-		{Name: "author", Type: table.String},
-		{Name: "body", Type: table.String},
-		{Name: "path", Type: table.String},
-		{Name: "hunk", Type: table.String},
-		{Name: "created", Type: table.Time},
-		{Name: "updated", Type: table.Time},
+	{Name: "review", Columns: []datumujo.Column{
+		{Name: "repo", Type: datumujo.Int64},
+		{Name: "number", Type: datumujo.Int64},
+		{Name: "id", Type: datumujo.Int64},
+		{Name: "author", Type: datumujo.String},
+		{Name: "body", Type: datumujo.String},
+		{Name: "path", Type: datumujo.String},
+		{Name: "hunk", Type: datumujo.String},
+		{Name: "created", Type: datumujo.Time},
+		{Name: "updated", Type: datumujo.Time},
 	}, Key: []string{"repo", "number", "id"}},
 }
 
-var loadIndexes = map[string][]table.IndexDef{
+var loadIndexes = map[string][]datumujo.IndexDef{
 	"issue": {
 		{Name: "by_state", Columns: []string{"repo", "state"}},
 		{Name: "by_author", Columns: []string{"author"}},
@@ -119,8 +116,8 @@ func timed(fn func()) time.Duration {
 
 // TestLoad is the load test of P-5 with typed tables. It loads the issues,
 // pull requests, comments and review comments of the two in-toto
-// repositories. Each issue is one commit, as a forge writes them, and a
-// checkpoint follows every 100 commits. Then it measures the reads a forge makes,
+// repositories. Each issue is one commit, as a forge writes them. It uses
+// the public API, with the automatic checkpoint. Then it measures the reads a forge makes,
 // the check and a backup. It runs only with DATUMUJO_LOAD set, see the
 // package comment. DATUMUJO_LOAD_PAGE_SIZE sets the page size.
 func TestLoad(t *testing.T) {
@@ -163,25 +160,19 @@ func TestLoad(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s, err := store.Open(vfs.OS{}, name, store.Options{PageSize: pageSize})
+	// Through the public API, as a program uses it. Checkpoints run by
+	// themselves, at the default log size.
+	db, err := datumujo.Open(name, datumujo.Options{PageSize: pageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		if s != nil {
-			s.Close()
-		}
-	}()
-	begin := func() (*store.Tx, *table.Tx) {
-		stx, err := s.Begin()
+	defer db.Close()
+	begin := func() *datumujo.Tx {
+		tx, err := db.Begin()
 		if err != nil {
 			t.Fatal(err)
 		}
-		tx, err := table.Begin(stx, s.PageSize())
-		if err != nil {
-			t.Fatal(err)
-		}
-		return stx, tx
+		return tx
 	}
 	must := func(err error) {
 		t.Helper()
@@ -189,37 +180,36 @@ func TestLoad(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	stx, tx := begin()
+	tx := begin()
 	for _, d := range loadDefs {
 		must(tx.CreateTable(d))
 		for _, ix := range loadIndexes[d.Name] {
 			must(tx.CreateIndex(d.Name, ix))
 		}
 	}
-	must(stx.Commit())
+	must(tx.Commit())
 
 	var m0 runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&m0)
 	commits, maxChanged, largest := 0, 0, ""
-	commit := func(stx *store.Tx, what string) {
-		if c := stx.Changed(); c > maxChanged {
+	var maxLog int64
+	commit := func(tx *datumujo.Tx, what string) {
+		if c := tx.Changed(); c > maxChanged {
 			maxChanged, largest = c, what
 		}
-		must(stx.Commit())
+		must(tx.Commit())
 		commits++
-		if commits%100 == 0 {
-			if _, err := s.Checkpoint(); err != nil {
-				t.Fatal(err)
-			}
+		if l := db.LogBytes(); l > maxLog {
+			maxLog = l
 		}
 	}
-	addComments := func(tx *table.Tx, repo int64, cs, rs []comment) {
+	addComments := func(tx *datumujo.Tx, repo int64, cs, rs []comment) {
 		for _, c := range cs {
-			must(tx.Insert("comment", table.Row{repo, int64(number(c.IssueURL)), c.ID, c.User.Login, c.Body, parseTime(t, c.CreatedAt), parseTime(t, c.UpdatedAt)}))
+			must(tx.Insert("comment", datumujo.Row{repo, int64(number(c.IssueURL)), c.ID, c.User.Login, c.Body, parseTime(t, c.CreatedAt), parseTime(t, c.UpdatedAt)}))
 		}
 		for _, c := range rs {
-			must(tx.Insert("review", table.Row{repo, int64(number(c.PullURL)), c.ID, c.User.Login, c.Body, c.Path, c.DiffHunk, parseTime(t, c.CreatedAt), parseTime(t, c.UpdatedAt)}))
+			must(tx.Insert("review", datumujo.Row{repo, int64(number(c.PullURL)), c.ID, c.User.Login, c.Body, c.Path, c.DiffHunk, parseTime(t, c.CreatedAt), parseTime(t, c.UpdatedAt)}))
 		}
 	}
 	start := time.Now()
@@ -236,14 +226,14 @@ func TestLoad(t *testing.T) {
 			if is.ClosedAt != "" {
 				closed = parseTime(t, is.ClosedAt)
 			}
-			stx, tx := begin()
-			must(tx.Insert("issue", table.Row{repo, is.Number, is.PullRequest != nil, is.Title, nullString(is.Body), is.State, is.User.Login,
+			tx := begin()
+			must(tx.Insert("issue", datumujo.Row{repo, is.Number, is.PullRequest != nil, is.Title, nullString(is.Body), is.State, is.User.Login,
 				parseTime(t, is.CreatedAt), parseTime(t, is.UpdatedAt), closed, nullString(strings.Join(labels, ","))}))
 			addComments(tx, repo, d.comments[is.Number], d.reviews[is.Number])
-			commit(stx, fmt.Sprintf("%s #%d", repos[ri], is.Number))
+			commit(tx, fmt.Sprintf("%s #%d", repos[ri], is.Number))
 		}
 		// Comments whose issue the API no longer returns: one commit.
-		stx, tx := begin()
+		tx := begin()
 		for n := range d.comments {
 			if !have[n] {
 				addComments(tx, repo, d.comments[n], nil)
@@ -254,23 +244,21 @@ func TestLoad(t *testing.T) {
 				addComments(tx, repo, nil, d.reviews[n])
 			}
 		}
-		commit(stx, "orphans of "+repos[ri])
+		commit(tx, "orphans of "+repos[ri])
 	}
 	loadTime := time.Since(start)
 	var m1 runtime.MemStats
 	runtime.ReadMemStats(&m1)
-	if _, err := s.Checkpoint(); err != nil {
+	if _, err := db.Checkpoint(); err != nil {
 		t.Fatal(err)
 	}
 	runtime.GC()
 	var m2 runtime.MemStats
 	runtime.ReadMemStats(&m2)
 
-	snap, err := s.Snapshot()
+	v, err := db.View()
 	must(err)
-	v, err := table.Open(snap, s.PageSize())
-	must(err)
-	count := func(tb string, o table.Options) int {
+	count := func(tb string, o datumujo.ScanOptions) int {
 		rows, err := v.Scan(tb, o)
 		must(err)
 		n := 0
@@ -298,7 +286,7 @@ func TestLoad(t *testing.T) {
 		for ri := range data {
 			var after []byte
 			for {
-				rows, err := v.Scan("issue", table.Options{Index: "by_state", Prefix: []any{int64(ri + 1), "open"}, After: after})
+				rows, err := v.Scan("issue", datumujo.ScanOptions{Index: "by_state", Prefix: []any{int64(ri + 1), "open"}, After: after})
 				must(err)
 				n := 0
 				for n < 30 && rows.Next() {
@@ -321,8 +309,8 @@ func TestLoad(t *testing.T) {
 		threadRows = 0
 		for ri, d := range data {
 			for _, is := range d.issues {
-				threadRows += count("comment", table.Options{Prefix: []any{int64(ri + 1), is.Number}})
-				threadRows += count("review", table.Options{Prefix: []any{int64(ri + 1), is.Number}})
+				threadRows += count("comment", datumujo.ScanOptions{Prefix: []any{int64(ri + 1), is.Number}})
+				threadRows += count("review", datumujo.ScanOptions{Prefix: []any{int64(ri + 1), is.Number}})
 			}
 		}
 	})
@@ -330,7 +318,7 @@ func TestLoad(t *testing.T) {
 	// The 30 issues changed last, per repository.
 	recentTime := timed(func() {
 		for ri := range data {
-			rows, err := v.Scan("issue", table.Options{Index: "by_updated", Prefix: []any{int64(ri + 1)}, Reverse: true})
+			rows, err := v.Scan("issue", datumujo.ScanOptions{Index: "by_updated", Prefix: []any{int64(ri + 1)}, Reverse: true})
 			must(err)
 			var last time.Time
 			for n := 0; n < 30 && rows.Next(); n++ {
@@ -345,19 +333,18 @@ func TestLoad(t *testing.T) {
 	})
 	counts := map[string]int{}
 	for _, d := range loadDefs {
-		counts[d.Name] = count(d.Name, table.Options{})
+		counts[d.Name] = count(d.Name, datumujo.ScanOptions{})
 	}
-	snap.Close()
+	v.Close()
 
 	copyName := filepath.Join(work, "copy")
 	start = time.Now()
-	must(backup.Backup(s, vfs.OS{}, copyName))
+	must(db.Backup(copyName))
 	backupTime := time.Since(start)
-	s.Close()
-	s = nil
+	must(db.Close())
 
 	start = time.Now()
-	r, err := check.Run(vfs.OS{}, name)
+	r, err := datumujo.Check(name)
 	must(err)
 	checkTime := time.Since(start)
 	if len(r.Findings) != 0 {
@@ -391,6 +378,7 @@ func TestLoad(t *testing.T) {
 	fmt.Printf("| rows | %d issues and pull requests, %d comments, %d review comments, %d of them without their issue |\n", issues, comments, reviews, orphans)
 	fmt.Printf("| load | %d commits in %v, %v per commit |\n", commits, loadTime.Round(time.Millisecond), (loadTime / time.Duration(commits)).Round(time.Microsecond))
 	fmt.Printf("| largest transaction | %d pages, %d bytes, of %d allowed (%s) |\n", maxChanged, maxBytes, store.DefaultMaxTxBytes, largest)
+	fmt.Printf("| log | at most %d bytes after a commit, checkpoints at %d |\n", maxLog, datumujo.DefaultCheckpointBytes)
 	// m0 was taken with the JSON data already read, so the difference is
 	// what the engine holds after the load and a checkpoint.
 	fmt.Printf("| memory | %d bytes allocated per commit; %d bytes more on the heap after the load than before |\n", (m1.TotalAlloc-m0.TotalAlloc)/uint64(commits), int64(m2.HeapAlloc)-int64(m0.HeapAlloc))

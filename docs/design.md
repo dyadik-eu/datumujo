@@ -413,8 +413,8 @@ frames in place, it allocated 9.59 MB: each frame once alone, and once
 in the buffer.
 
 Outside a transaction, the log keeps a small entry for each page image
-until the next checkpoint. The engine does not checkpoint by itself. A
-program calls Checkpoint, as the load test does every 100 commits.
+until the next checkpoint. A commit starts a checkpoint when the log has
+reached a size; see "The public API".
 
 ## Load test
 
@@ -454,6 +454,27 @@ They are in the table, and no prefix scan of an issue finds them.
 A commit costs about 4.7 ms; where the time goes was not measured here.
 The reads a forge makes per request stay below a millisecond. For this load,
 the engine needs no page cache.
+
+## The public API
+
+The package at the root of the module is what a program uses. Everything
+under `internal/` stays free to change. The package has Open with
+Options, a DB with Begin, Update, View, Read, Checkpoint and Backup, and
+the functions Check and Restore. Tx and View carry the methods of the
+table layer: tables, indexes, rows, scans and counters. The types of
+tables, rows and scans are aliases of the engine's types, so a program
+can name them.
+
+A commit that leaves the log at Options.CheckpointBytes or larger starts
+a checkpoint, 4 MiB by default. While a view of an earlier commit is
+open, the checkpoint does nothing, and the next commit tries again. A
+negative size turns this off, and the program calls Checkpoint itself.
+If the checkpoint fails, Commit returns an error that matches
+ErrCheckpoint. The commit is durable then; only the log did not shrink.
+
+The load test runs through this API. Three runs on 26.09.2026, with a
+load average of about 5, gave the same counts as below. The log stayed
+under 4 MiB after each commit, and the checkpoints ran by themselves.
 
 ## One process, one writer
 

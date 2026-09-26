@@ -71,7 +71,9 @@ var ErrCannotCheck = errors.New("check: could not check")
 // and writes nothing but the lock file. An error from Run matches ErrCannotCheck; a damaged file
 // gives a Report with findings instead.
 func Run(fs vfs.FS, name string) (*Report, error) {
-	cannot := func(err error) error { return fmt.Errorf("%w: %s: %v", ErrCannotCheck, name, err) }
+	// Both errors stay reachable with errors.Is: that the check could not
+	// check, and why, for example vfs.ErrLocked.
+	cannot := func(err error) error { return fmt.Errorf("%w: %s: %w", ErrCannotCheck, name, err) }
 	exists, err := fs.Exists(name)
 	if err != nil {
 		return nil, cannot(err)
