@@ -84,5 +84,5 @@ This is rule 10 of the house rules: a silent failure invents a value.
 | ID | Question |
 |---|---|
 | Q-1 | Module path: `github.com/dyadik-eu/datumujo` for now. An own domain can replace it before the first release. |
-| Q-2 | Page size and the B-tree layout. This decision is made after a measurement, not before. |
+| Q-2 | Page size. Decided on 26.09.2026 after a measurement: 4096 bytes. See "Page size" in design.md. |
 | Q-3 | When the repository becomes public. |
