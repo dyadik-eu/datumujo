@@ -49,12 +49,29 @@ type Def struct {
 	Key     []string
 }
 
-// Limits of a schema. They bound what a decoder allocates for a schema
-// from the file.
+// Limits of a schema.
 const (
 	MaxName    = 255
 	MaxColumns = 1024
+	MaxIndexes = 64
 )
+
+// IndexDef defines an index: its name, the names of its columns in index
+// order, and whether two rows may have the same values in them. Rows with
+// a null in an index column never conflict in a unique index.
+type IndexDef struct {
+	Name    string
+	Columns []string
+	Unique  bool
+}
+
+// Index is an index of a table.
+type Index struct {
+	Name    string
+	Columns []int // column numbers, in index order
+	Unique  bool
+	Root    uint64 // root page of the index's tree
+}
 
 // Table is a table of the schema.
 type Table struct {
@@ -62,6 +79,17 @@ type Table struct {
 	Columns []Column
 	Key     []int  // column numbers of the primary key, in key order
 	Root    uint64 // root page of the table's tree
+	Indexes []Index
+}
+
+// Index returns the index with the given name.
+func (t *Table) Index(name string) (*Index, bool) {
+	for i := range t.Indexes {
+		if t.Indexes[i].Name == name {
+			return &t.Indexes[i], true
+		}
+	}
+	return nil, false
 }
 
 // Schema is the set of tables with the version of the schema. The tables
@@ -132,23 +160,59 @@ func (t *Table) check() error {
 			return schemaErr("table %s: key column %s allows null", t.Name, t.Columns[k].Name)
 		}
 	}
+	if len(t.Indexes) > MaxIndexes {
+		return schemaErr("table %s: %d indexes, at most %d", t.Name, len(t.Indexes), MaxIndexes)
+	}
+	names := map[string]bool{}
+	for _, ix := range t.Indexes {
+		if err := checkName("index", ix.Name); err != nil {
+			return err
+		}
+		if names[ix.Name] {
+			return schemaErr("table %s: index %s twice", t.Name, ix.Name)
+		}
+		names[ix.Name] = true
+		if len(ix.Columns) == 0 {
+			return schemaErr("table %s: index %s has no columns", t.Name, ix.Name)
+		}
+		inIndex := map[int]bool{}
+		for _, c := range ix.Columns {
+			if c < 0 || c >= len(t.Columns) {
+				return schemaErr("table %s: index %s: column %d; there are %d columns", t.Name, ix.Name, c, len(t.Columns))
+			}
+			if inIndex[c] {
+				return schemaErr("table %s: index %s: column %s twice", t.Name, ix.Name, t.Columns[c].Name)
+			}
+			inIndex[c] = true
+		}
+	}
 	return nil
 }
 
-// fromDef turns a definition into a table without a root.
-func fromDef(d Def) (Table, error) {
-	t := Table{Name: d.Name, Columns: append([]Column(nil), d.Columns...)}
-	for _, name := range d.Key {
+// columnNumbers returns the numbers of the named columns.
+func (t *Table) columnNumbers(what string, names []string) ([]int, error) {
+	var out []int
+	for _, name := range names {
 		k := -1
-		for i, c := range d.Columns {
+		for i, c := range t.Columns {
 			if c.Name == name {
 				k = i
 			}
 		}
 		if k < 0 {
-			return Table{}, schemaErr("table %s: key column %s does not exist", d.Name, name)
+			return nil, schemaErr("table %s: %s column %s does not exist", t.Name, what, name)
 		}
-		t.Key = append(t.Key, k)
+		out = append(out, k)
+	}
+	return out, nil
+}
+
+// fromDef turns a definition into a table without a root.
+func fromDef(d Def) (Table, error) {
+	t := Table{Name: d.Name, Columns: append([]Column(nil), d.Columns...)}
+	var err error
+	if t.Key, err = t.columnNumbers("key", d.Key); err != nil {
+		return Table{}, err
 	}
 	return t, t.check()
 }
@@ -170,7 +234,9 @@ func (t *Table) values() []int {
 }
 
 // schemaFormat is the first byte of an encoded schema.
-const schemaFormat = 1
+// Format 1 had no indexes. No release wrote it, and this code does not
+// read it.
+const schemaFormat = 2
 
 // encodeSchema writes the schema. decodeSchema of the result gives the
 // same schema, and encodeSchema of a decoded schema gives the same bytes.
@@ -197,6 +263,20 @@ func encodeSchema(s *Schema) []byte {
 		b = binary.AppendUvarint(b, uint64(len(t.Key)))
 		for _, k := range t.Key {
 			b = binary.AppendUvarint(b, uint64(k))
+		}
+		b = binary.AppendUvarint(b, uint64(len(t.Indexes)))
+		for _, ix := range t.Indexes {
+			str(ix.Name)
+			unique := byte(0)
+			if ix.Unique {
+				unique = 1
+			}
+			b = append(b, unique)
+			b = binary.AppendUvarint(b, ix.Root)
+			b = binary.AppendUvarint(b, uint64(len(ix.Columns)))
+			for _, c := range ix.Columns {
+				b = binary.AppendUvarint(b, uint64(c))
+			}
 		}
 	}
 	return b
@@ -235,6 +315,27 @@ func decodeSchema(b []byte) (*Schema, error) {
 			// check rejects a column number out of range. One above
 			// the range of int becomes negative and is rejected too.
 			t.Key = append(t.Key, int(d.uvarint()))
+		}
+		// Each index takes at least 5 bytes, each of its columns 1.
+		nix := d.count(5)
+		for j := 0; j < nix && d.err == nil; j++ {
+			ix := Index{Name: d.str()}
+			switch d.byte() {
+			case 0:
+			case 1:
+				ix.Unique = true
+			default:
+				d.fail("index flags")
+			}
+			ix.Root = d.uvarint()
+			if d.err == nil && ix.Root == 0 {
+				d.fail("index %s has root page 0", ix.Name)
+			}
+			cols := d.count(1)
+			for k := 0; k < cols && d.err == nil; k++ {
+				ix.Columns = append(ix.Columns, int(d.uvarint()))
+			}
+			t.Indexes = append(t.Indexes, ix)
 		}
 		if d.err != nil {
 			break

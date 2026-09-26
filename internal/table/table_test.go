@@ -158,7 +158,7 @@ func TestRoundTrip(t *testing.T) {
 			}
 		}
 		// Scan returns the rows in the order of the values.
-		rows, err := v.Scan(name)
+		rows, err := v.Scan(name, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -376,7 +376,7 @@ func TestRowsRejected(t *testing.T) {
 	if _, err := tx.Delete("t", "1"); !errors.Is(err, ErrValue) {
 		t.Errorf("delete with a string key: %v", err)
 	}
-	rows, _ := tx.Scan("t")
+	rows, _ := tx.Scan("t", Options{})
 	var got []string
 	for rows.Next() {
 		got = append(got, fmt.Sprint(rows.Row()))
@@ -591,7 +591,7 @@ func compareAll(t *testing.T, s *store.Store, oracle map[string]map[string]Row) 
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-		rows, err := v.Scan(name)
+		rows, err := v.Scan(name, Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -639,7 +639,7 @@ func TestDamagedRowIsAnError(t *testing.T) {
 		if _, _, err := tx.Get("t", int64(1)); !errors.Is(err, ErrDamaged) {
 			t.Errorf("%s: get: %v", name, err)
 		}
-		rows, _ := tx.Scan("t")
+		rows, _ := tx.Scan("t", Options{})
 		if rows.Next() || !errors.Is(rows.Err(), ErrDamaged) {
 			t.Errorf("%s: scan: %v", name, rows.Err())
 		}
@@ -648,7 +648,7 @@ func TestDamagedRowIsAnError(t *testing.T) {
 	if err := tree.Put(stx, key[:7], []byte{1, 0, 2}); err != nil {
 		t.Fatal(err)
 	}
-	rows, _ := tx.Scan("t")
+	rows, _ := tx.Scan("t", Options{})
 	if rows.Next() || !errors.Is(rows.Err(), ErrDamaged) {
 		t.Errorf("short key: scan: %v", rows.Err())
 	}
@@ -673,7 +673,10 @@ var fuzzTable = func() *Table {
 	for i, typ := range allTypes {
 		cols = append(cols, Column{fmt.Sprint("v", i), typ, true}, Column{fmt.Sprint("w", i), typ, false})
 	}
-	t := &Table{Name: "f", Columns: cols, Key: key, Root: 1}
+	t := &Table{Name: "f", Columns: cols, Key: key, Root: 1, Indexes: []Index{
+		{Name: "i", Columns: []int{6, 7, 8, 9, 10, 11, 12, 13}, Root: 2},
+		{Name: "u", Columns: []int{0, 7}, Unique: true, Root: 3},
+	}}
 	if err := t.check(); err != nil {
 		panic(err)
 	}
@@ -742,7 +745,9 @@ func FuzzDecodeSchema(f *testing.F) {
 // the run after every call, then simulates 64 power losses each. The file opens with the schema and the
 // rows of the acked batches, or of those plus the one in flight.
 func TestCrashWithTables(t *testing.T) {
-	def := Def{Name: "t", Columns: []Column{{"k", Int64, false}, {"v", String, true}}, Key: []string{"k"}}
+	// The index is on g, not on v: v holds values of a page and more, too
+	// long for a key.
+	def := Def{Name: "t", Columns: []Column{{"k", Int64, false}, {"v", String, true}, {"g", Int64, true}}, Key: []string{"k"}}
 	type step struct {
 		puts map[int64]string
 		dels []int64
@@ -768,10 +773,11 @@ func TestCrashWithTables(t *testing.T) {
 	}
 	type state struct {
 		version uint64
+		counter uint64
 		rows    map[int64]string
 	}
 	apply := func(s state, st step) state {
-		out := state{version: s.version, rows: map[int64]string{}}
+		out := state{version: s.version, counter: s.counter + 1, rows: map[int64]string{}}
 		for k, v := range s.rows {
 			out.rows[k] = v
 		}
@@ -786,7 +792,7 @@ func TestCrashWithTables(t *testing.T) {
 		}
 		return out
 	}
-	final := state{version: 1, rows: map[int64]string{}}
+	final := state{version: 2, rows: map[int64]string{}}
 	for _, st := range steps {
 		final = apply(final, st)
 	}
@@ -799,9 +805,9 @@ func TestCrashWithTables(t *testing.T) {
 		if err != nil {
 			return
 		}
-		running = state{version: 1, rows: map[int64]string{}}
+		running = state{version: 2, rows: map[int64]string{}}
 		tx, err := Begin(stx, pageSize)
-		if err != nil || tx.CreateTable(def) != nil || stx.Commit() != nil {
+		if err != nil || tx.CreateTable(def) != nil || tx.CreateIndex("t", IndexDef{Name: "by_g", Columns: []string{"g"}}) != nil || stx.Commit() != nil {
 			return
 		}
 		acked = running
@@ -816,6 +822,9 @@ func TestCrashWithTables(t *testing.T) {
 				return
 			}
 			if st.add && tx.AddColumn("t", Column{"n", Int64, true}) != nil {
+				return
+			}
+			if _, err := tx.Next("steps"); err != nil {
 				return
 			}
 			width := len(tx.Schema().Tables[0].Columns)
@@ -833,7 +842,7 @@ func TestCrashWithTables(t *testing.T) {
 			sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 			for _, k := range keys {
 				row := make(Row, width)
-				row[0], row[1] = k, st.puts[k]
+				row[0], row[1], row[2] = k, st.puts[k], k%3
 				err := tx.Insert("t", row)
 				if errors.Is(err, ErrExists) {
 					err = tx.Update("t", row)
@@ -885,9 +894,23 @@ func TestCrashWithTables(t *testing.T) {
 				t.Fatalf("k %d, power %d: schema: %v", k, power, err)
 			}
 			got := state{version: v.Schema().Version, rows: map[int64]string{}}
+			if got.counter, err = v.Counter("steps"); err != nil {
+				t.Fatalf("k %d, power %d: counter: %v", k, power, err)
+			}
 			if got.version > 0 {
-				rows, err := v.Scan("t")
+				// The index holds exactly the rows of the table.
+				byV := map[int64]string{}
+				rows, err := v.Scan("t", Options{Index: "by_g"})
 				if err != nil {
+					t.Fatal(err)
+				}
+				for rows.Next() {
+					byV[rows.Row()[0].(int64)] = rows.Row()[1].(string)
+				}
+				if rows.Err() != nil {
+					t.Fatalf("k %d, power %d: index scan: %v", k, power, rows.Err())
+				}
+				if rows, err = v.Scan("t", Options{}); err != nil {
 					t.Fatal(err)
 				}
 				for rows.Next() {
@@ -895,6 +918,9 @@ func TestCrashWithTables(t *testing.T) {
 				}
 				if rows.Err() != nil {
 					t.Fatalf("k %d, power %d: scan: %v", k, power, rows.Err())
+				}
+				if fmt.Sprint(byV) != fmt.Sprint(got.rows) {
+					t.Fatalf("k %d, power %d: the index holds %d rows, the table %d", k, power, len(byV), len(got.rows))
 				}
 			}
 			snap.Close()
@@ -905,8 +931,8 @@ func TestCrashWithTables(t *testing.T) {
 			case fmt.Sprint(running):
 				toRunning++
 			default:
-				t.Fatalf("k %d, power %d: version %d with %d rows; acked %d with %d, running %d with %d",
-					k, power, got.version, len(got.rows), acked.version, len(acked.rows), running.version, len(running.rows))
+				t.Fatalf("k %d, power %d: version %d, counter %d, %d rows; acked %+v, running %+v",
+					k, power, got.version, got.counter, len(got.rows), acked, running)
 			}
 		}
 	}
@@ -931,8 +957,13 @@ func TestFuzzSeedsDecode(t *testing.T) {
 	if !sameRow(row, fuzzRow()) {
 		t.Errorf("the seed row comes back as %v", row)
 	}
-	if _, err := decodeSchema(encodeSchema(&Schema{Version: 3, Tables: []Table{*fuzzTable}})); err != nil {
+	s, err := decodeSchema(encodeSchema(&Schema{Version: 3, Tables: []Table{*fuzzTable}}))
+	if err != nil || len(s.Tables[0].Indexes) != 2 {
 		t.Errorf("schema: %v", err)
+	}
+	ix := &fuzzTable.Indexes[0]
+	if _, err := decodeIndexKey(fuzzTable, ix, indexKey(fuzzTable, ix, fuzzRow()), make(Row, len(fuzzTable.Columns))); err != nil {
+		t.Errorf("index key: %v", err)
 	}
 }
 
@@ -991,18 +1022,35 @@ func TestDecodersReject(t *testing.T) {
 		return b
 	}
 	// enc is: format, version, 1 table, len 1 "a", root 3, 1 column,
-	// len 1 "x", type, flags, 1 key column, column 0.
+	// len 1 "x", type, flags, 1 key column, column 0, 0 indexes.
 	twoTables := encodeSchema(&Schema{Tables: []Table{good.Tables[0], good.Tables[0]}})
 	// A second column outside the key: its flags byte is the last but
-	// three.
+	// four.
 	wide := encodeSchema(&Schema{Tables: []Table{{Name: "a", Columns: []Column{{"x", Int64, false}, {"y", Int64, false}}, Key: []int{0}, Root: 3}}})
-	wide[len(wide)-3] = 2
+	wide[len(wide)-4] = 2
+	noKey := append(change(11, 0)[:12:12], enc[13:]...)
 	// 2^63 tables: as an int the count is negative, and a loop over it
 	// would read no table and report an empty schema.
 	huge := binary.AppendUvarint([]byte{schemaFormat, 1}, 1<<63)
+	// ix is enc with one index: name "i", unique flag, root 4, one column,
+	// column 0. It ends at the old end plus 6 bytes.
+	withIndex := func(flag, root, ncols, col byte) []byte {
+		b := append([]byte(nil), enc[:len(enc)-1]...)
+		b = append(b, 1, 1, 'i', flag, root, ncols)
+		if ncols > 0 {
+			b = append(b, col)
+		}
+		return b
+	}
+	twoIndexes := append(withIndex(0, 4, 1, 0)[:len(enc)-1:len(enc)-1], 2, 1, 'i', 0, 4, 1, 0, 1, 'i', 0, 5, 1, 0)
 	schemas := map[string][]byte{
+		"index flags 2":          withIndex(2, 4, 1, 0),
+		"index root 0":           withIndex(0, 0, 1, 0),
+		"index without column":   withIndex(0, 4, 0, 0),
+		"index column 1 of 1":    withIndex(0, 4, 1, 1),
+		"index name twice":       twoIndexes,
 		"empty":                  {},
-		"format 2":               change(0, 2),
+		"format 1":               change(0, 1),
 		"root 0":                 change(5, 0),
 		"type 9":                 change(9, 9),
 		"flags 2":                change(10, 2),
@@ -1012,7 +1060,7 @@ func TestDecodersReject(t *testing.T) {
 		"byte after the end":     append(append([]byte(nil), enc...), 0),
 		"cut":                    enc[:len(enc)-1],
 		"same table twice":       twoTables,
-		"no key":                 change(11, 0)[:12],
+		"no key":                 noKey,
 		"flags 2 outside key":    wide,
 		"table count 2^63":       huge,
 	}
@@ -1021,7 +1069,15 @@ func TestDecodersReject(t *testing.T) {
 			t.Errorf("schema, %s: %v", name, err)
 		}
 	}
-	if _, err := decodeSchema(enc); err != nil {
-		t.Fatalf("the unchanged schema: %v", err)
+	for name, b := range map[string][]byte{"the unchanged schema": enc, "one index": withIndex(0, 4, 1, 0), "one unique index": withIndex(1, 4, 1, 0)} {
+		if _, err := decodeSchema(b); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// An index key with a null mark of 2.
+	ix := &Index{Name: "i", Columns: []int{1}}
+	nt := &Table{Name: "t", Columns: []Column{{"k", Int64, false}, {"a", Int64, true}}, Key: []int{0}}
+	if _, err := decodeIndexKey(nt, ix, append([]byte{2}, appendKey(nil, Int64, int64(5))...), make(Row, 2)); !errors.Is(err, ErrDamaged) {
+		t.Errorf("index key, null mark 2: %v", err)
 	}
 }

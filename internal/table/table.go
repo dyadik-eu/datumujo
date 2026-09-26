@@ -1,6 +1,7 @@
 package table
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"sort"
@@ -9,7 +10,7 @@ import (
 )
 
 // CatalogSlot is the root slot of the catalog tree, which holds the
-// schema.
+// schema and the counters.
 const CatalogSlot = 0
 
 // schemaKey is the key of the schema in the catalog tree.
@@ -32,8 +33,10 @@ type Writer interface {
 // Errors of reads and writes of rows.
 var (
 	ErrNoTable  = errors.New("table: no such table")
+	ErrNoIndex  = errors.New("table: no such index")
 	ErrExists   = errors.New("table: a row with this key exists")
 	ErrNotFound = errors.New("table: no row with this key")
+	ErrUnique   = errors.New("table: a row with these values exists in a unique index")
 )
 
 // View reads the tables as one snapshot or one write transaction sees
@@ -114,6 +117,10 @@ func (v *View) Get(table string, key ...any) (Row, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	return v.get(t, k)
+}
+
+func (v *View) get(t *Table, k []byte) (Row, bool, error) {
 	value, ok, err := btree.Open(t.Root, v.pageSize).Get(v.r, k)
 	if err != nil || !ok {
 		return nil, false, err
@@ -122,58 +129,12 @@ func (v *View) Get(table string, key ...any) (Row, bool, error) {
 	return row, err == nil, err
 }
 
-// Rows walks the rows of a table in key order.
-type Rows struct {
-	v   *View
-	t   *Table
-	c   *btree.Cursor
-	row Row
-	err error
-}
-
-// Scan returns the rows of a table in key order, not yet positioned: call
-// Next first.
-func (v *View) Scan(table string) (*Rows, error) {
-	t, err := v.table(table)
-	if err != nil {
-		return nil, err
-	}
-	return &Rows{v: v, t: t, c: btree.Open(t.Root, v.pageSize).Cursor(v.r)}, nil
-}
-
-// Next moves to the next row and reports whether there is one. After
-// false, Err tells an end from a failure.
-func (r *Rows) Next() bool {
-	if r.err != nil {
-		return false
-	}
-	if r.row == nil {
-		r.c.First()
-	} else {
-		r.c.Next()
-	}
-	if !r.c.Valid() {
-		r.err = r.c.Err()
-		return false
-	}
-	value, err := r.c.Value()
-	if err == nil {
-		r.row, err = r.v.decodeRow(r.t, r.c.Key(), value)
-	}
-	r.err = err
-	return err == nil
-}
-
-// Row returns the current row.
-func (r *Rows) Row() Row { return r.row }
-
-// Err returns the error that stopped the scan, if any.
-func (r *Rows) Err() error { return r.err }
-
 // Tx changes tables and the schema in one write transaction of the store.
 // The store transaction commits or rolls back all of it. After an error
-// other than ErrValue, ErrSchema, ErrNoTable, ErrExists or ErrNotFound, the
-// caller rolls the store transaction back.
+// that does not match ErrValue, ErrSchema, ErrNoTable, ErrNoIndex,
+// ErrExists, ErrNotFound or ErrUnique, the caller rolls the store
+// transaction back. A write during a scan of the same Tx leaves the scan
+// undefined.
 type Tx struct {
 	View
 	w Writer
@@ -188,20 +149,27 @@ func Begin(w Writer, pageSize int) (*Tx, error) {
 	return &Tx{View: *v, w: w}, nil
 }
 
+// catalog returns the catalog tree. Without one, it creates it with the
+// schema as it is.
+func (tx *Tx) catalog() (*btree.Tree, error) {
+	if root := tx.w.Root(CatalogSlot); root != 0 {
+		return btree.Open(root, tx.pageSize), nil
+	}
+	cat, err := btree.Create(tx.w, tx.pageSize)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.w.SetRoot(CatalogSlot, cat.Root); err != nil {
+		return nil, err
+	}
+	return cat, cat.Put(tx.w, schemaKey, encodeSchema(tx.schema))
+}
+
 // saveSchema writes the schema with the next version.
 func (tx *Tx) saveSchema(s *Schema) error {
-	root := tx.w.Root(CatalogSlot)
-	var cat *btree.Tree
-	if root == 0 {
-		var err error
-		if cat, err = btree.Create(tx.w, tx.pageSize); err != nil {
-			return err
-		}
-		if err := tx.w.SetRoot(CatalogSlot, cat.Root); err != nil {
-			return err
-		}
-	} else {
-		cat = btree.Open(root, tx.pageSize)
+	cat, err := tx.catalog()
+	if err != nil {
+		return err
 	}
 	s.Version = tx.schema.Version + 1
 	if err := cat.Put(tx.w, schemaKey, encodeSchema(s)); err != nil {
@@ -212,9 +180,9 @@ func (tx *Tx) saveSchema(s *Schema) error {
 }
 
 // copySchema returns a copy that a change can modify. The copy shares
-// the column and key slices of each table. A change only appends to them
-// and never writes within their length, so the schema it copies from
-// stays as it was.
+// the column, key and index slices of each table. A change only appends
+// to them and never writes within their length, so the schema it copies
+// from stays as it was.
 func (tx *Tx) copySchema() *Schema {
 	return &Schema{Version: tx.schema.Version, Tables: append([]Table(nil), tx.schema.Tables...)}
 }
@@ -257,14 +225,82 @@ func (tx *Tx) AddColumn(table string, c Column) error {
 	return tx.saveSchema(s)
 }
 
+// CreateIndex adds an index to a table and fills it from the rows. If a
+// row does not fit the index, it fails, frees the pages of the new index
+// and changes no row and no schema.
+func (tx *Tx) CreateIndex(table string, d IndexDef) error {
+	if _, err := tx.table(table); err != nil {
+		return err
+	}
+	s := tx.copySchema()
+	t, _ := s.Table(table)
+	cols, err := t.columnNumbers("index", d.Columns)
+	if err != nil {
+		return err
+	}
+	t.Indexes = append(append([]Index(nil), t.Indexes...), Index{Name: d.Name, Columns: cols, Unique: d.Unique})
+	if err := t.check(); err != nil {
+		return err
+	}
+	tree, err := btree.Create(tx.w, tx.pageSize)
+	if err != nil {
+		return err
+	}
+	ix := &t.Indexes[len(t.Indexes)-1]
+	ix.Root = tree.Root
+	if err := tx.fill(t, ix); err != nil {
+		if drop := tree.Drop(tx.w); drop != nil {
+			return errors.Join(err, drop)
+		}
+		return err
+	}
+	return tx.saveSchema(s)
+}
+
+// fill puts an entry for each row of the table into a new index.
+func (tx *Tx) fill(t *Table, ix *Index) error {
+	c := btree.Open(t.Root, tx.pageSize).Cursor(tx.w)
+	for c.First(); c.Valid(); c.Next() {
+		value, err := c.Value()
+		if err != nil {
+			return err
+		}
+		row, err := tx.decodeRow(t, c.Key(), value)
+		if err != nil {
+			return err
+		}
+		for _, col := range ix.Columns {
+			if err := checkValue(t, t.Columns[col], row[col], true); err != nil {
+				return err
+			}
+		}
+		if err := tx.addEntry(t, ix, row); err != nil {
+			return err
+		}
+	}
+	return c.Err()
+}
+
+// indexed reports the columns that are in the key or in an index. Their
+// values have a key form, so a float there must not be NaN.
+func indexed(t *Table) map[int]bool {
+	m := map[int]bool{}
+	for _, k := range t.Key {
+		m[k] = true
+	}
+	for _, ix := range t.Indexes {
+		for _, c := range ix.Columns {
+			m[c] = true
+		}
+	}
+	return m
+}
+
 func (tx *Tx) checkRow(t *Table, row Row) error {
 	if len(row) != len(t.Columns) {
 		return fmt.Errorf("%w: table %s: %d values, the table has %d columns", ErrValue, t.Name, len(row), len(t.Columns))
 	}
-	inKey := map[int]bool{}
-	for _, k := range t.Key {
-		inKey[k] = true
-	}
+	inKey := indexed(t)
 	for i, c := range t.Columns {
 		if err := checkValue(t, c, row[i], inKey[i]); err != nil {
 			return err
@@ -273,8 +309,64 @@ func (tx *Tx) checkRow(t *Table, row Row) error {
 	return nil
 }
 
+// checkLength checks a key against the limit of the tree before anything
+// is written.
+func (tx *Tx) checkLength(what string, k []byte) error {
+	if max := btree.LimitsFor(tx.pageSize).MaxKey; len(k) > max {
+		return fmt.Errorf("%w: %s: a key of %d bytes, at most %d for pages of %d", ErrValue, what, len(k), max, tx.pageSize)
+	}
+	return nil
+}
+
+// checkUnique fails if a row has the index values of row in a unique
+// index. A row with a null in the index conflicts with no row. The row
+// itself has no entry with these values. In put, the check runs only
+// for an index whose values change. In fill, it runs before the row's
+// entry is added.
+func (tx *Tx) checkUnique(t *Table, ix *Index, row Row) error {
+	if !ix.Unique {
+		return nil
+	}
+	for _, c := range ix.Columns {
+		if row[c] == nil {
+			return nil
+		}
+	}
+	// The key forms of index values are prefix-free, so an entry starts
+	// with prefix exactly when it has these values.
+	prefix := appendIndexColumns(nil, t, ix, row)
+	c := btree.Open(ix.Root, tx.pageSize).Cursor(tx.w)
+	if c.Seek(prefix); c.Valid() && bytes.HasPrefix(c.Key(), prefix) {
+		return fmt.Errorf("%w: table %s, index %s", ErrUnique, t.Name, ix.Name)
+	}
+	return c.Err()
+}
+
+// addEntry checks an index entry for a row and puts it.
+func (tx *Tx) addEntry(t *Table, ix *Index, row Row) error {
+	k := indexKey(t, ix, row)
+	if err := tx.checkLength("index "+ix.Name, k); err != nil {
+		return err
+	}
+	if err := tx.checkUnique(t, ix, row); err != nil {
+		return err
+	}
+	return btree.Open(ix.Root, tx.pageSize).Put(tx.w, k, nil)
+}
+
+// removeEntry deletes the index entry of a row. A missing entry means the
+// index does not match the table.
+func (tx *Tx) removeEntry(t *Table, ix *Index, row Row) error {
+	found, err := btree.Open(ix.Root, tx.pageSize).Delete(tx.w, indexKey(t, ix, row))
+	if err == nil && !found {
+		err = &damaged{"index " + ix.Name + " of table " + t.Name, "no entry for a row of the table"}
+	}
+	return err
+}
+
 // put writes a row. With exists false, no row may have the key yet. With
-// exists true, a row must have it.
+// exists true, a row must have it. All checks run before the first write,
+// so a failed check changes nothing.
 func (tx *Tx) put(table string, row Row, exists bool) error {
 	t, err := tx.table(table)
 	if err != nil {
@@ -283,9 +375,11 @@ func (tx *Tx) put(table string, row Row, exists bool) error {
 	if err := tx.checkRow(t, row); err != nil {
 		return err
 	}
-	tree := btree.Open(t.Root, tx.pageSize)
 	k := encodeKey(t, row)
-	_, found, err := tree.Get(tx.w, k)
+	if err := tx.checkLength("table "+t.Name, k); err != nil {
+		return err
+	}
+	old, found, err := tx.get(t, k)
 	switch {
 	case err != nil:
 		return err
@@ -294,14 +388,45 @@ func (tx *Tx) put(table string, row Row, exists bool) error {
 	case !found && exists:
 		return fmt.Errorf("%w: table %s", ErrNotFound, t.Name)
 	}
-	return tree.Put(tx.w, k, encodeValues(t, row))
+	// An index entry changes only if the index values change.
+	changed := make([]bool, len(t.Indexes))
+	for i := range t.Indexes {
+		ix := &t.Indexes[i]
+		changed[i] = !found || !bytes.Equal(indexKey(t, ix, old), indexKey(t, ix, row))
+		if !changed[i] {
+			continue
+		}
+		if err := tx.checkLength("index "+ix.Name, indexKey(t, ix, row)); err != nil {
+			return err
+		}
+		if err := tx.checkUnique(t, ix, row); err != nil {
+			return err
+		}
+	}
+	for i := range t.Indexes {
+		ix := &t.Indexes[i]
+		if !changed[i] {
+			continue
+		}
+		if found {
+			if err := tx.removeEntry(t, ix, old); err != nil {
+				return err
+			}
+		}
+		if err := btree.Open(ix.Root, tx.pageSize).Put(tx.w, indexKey(t, ix, row), nil); err != nil {
+			return err
+		}
+	}
+	return btree.Open(t.Root, tx.pageSize).Put(tx.w, k, encodeValues(t, row))
 }
 
-// Insert adds a row. It fails with ErrExists if a row has the same key.
+// Insert adds a row. It fails with ErrExists if a row has the same key,
+// and with ErrUnique if a unique index has its values.
 func (tx *Tx) Insert(table string, row Row) error { return tx.put(table, row, false) }
 
 // Update replaces the row with the same key. It fails with ErrNotFound if
-// there is none.
+// there is none, and with ErrUnique if another row has its values in a
+// unique index.
 func (tx *Tx) Update(table string, row Row) error { return tx.put(table, row, true) }
 
 // Delete removes the row with the given key values and reports whether
@@ -314,6 +439,15 @@ func (tx *Tx) Delete(table string, key ...any) (bool, error) {
 	k, err := keyOf(t, key)
 	if err != nil {
 		return false, err
+	}
+	old, found, err := tx.get(t, k)
+	if err != nil || !found {
+		return false, err
+	}
+	for i := range t.Indexes {
+		if err := tx.removeEntry(t, &t.Indexes[i], old); err != nil {
+			return false, err
+		}
 	}
 	return btree.Open(t.Root, tx.pageSize).Delete(tx.w, k)
 }
