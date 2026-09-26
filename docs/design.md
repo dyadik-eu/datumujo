@@ -115,6 +115,29 @@ The page size is a field of the header. The value for new files is decided
 after a measurement with the load of P-5 (Q-2). Until then the tests run with
 more than one size.
 
+## The tree
+
+Tables and indexes are B+trees of byte keys and byte values, ordered by
+bytes.Compare. An entry takes at most a quarter of a node, so a node that
+grows past its page splits into two that fit. A value that would make its
+entry larger goes to a chain of overflow pages.
+
+The root page of a tree never changes. When the root splits, its content
+moves to two new pages, and the root becomes an internal node over them. So
+the number of the root is kept once, in a root slot of the header.
+
+A node below a quarter of a page merges with a neighbour when both fit in
+one page. Entries do not move between neighbours. So a node can stay below
+a quarter; this costs space, not correctness. An internal root with one
+child takes over the content of that child.
+
+A cursor holds the path from the root to its leaf. It needs no links
+between leaves, so a split or merge changes no neighbour.
+
+A node is decoded, changed and encoded again for every change. The decoder
+checks each length against the page. It accepts only the shortest form of a
+number. So it returns an error on content that this code does not write.
+
 ## One process, one writer
 
 The database runs in one process (S-1). Inside the process, one write
