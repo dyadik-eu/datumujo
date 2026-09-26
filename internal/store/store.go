@@ -13,6 +13,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"sync"
 
 	"github.com/dyadik-eu/datumujo/internal/page"
@@ -27,7 +29,15 @@ const DefaultPageSize = 4096
 // Options are used when Open creates a file.
 type Options struct {
 	PageSize int // 0 means DefaultPageSize
+	// ReadOnly opens an existing database and writes nothing to it: no
+	// file is created, the log is not started or cut, and Begin and
+	// Checkpoint fail. The lock file is still taken.
+	ReadOnly bool
 }
+
+// ErrReadOnly is returned by Begin and Checkpoint on a store opened
+// read-only.
+var ErrReadOnly = errors.New("store: the database is open read-only")
 
 // Store is an open database file with its log.
 type Store struct {
@@ -41,9 +51,15 @@ type Store struct {
 	writer sync.Mutex
 
 	recovered wal.Recovered // what Open found in the log
+	readOnly  bool
 
-	mu      sync.Mutex
-	hdr     page.Header // the header as of the last commit
+	mu  sync.Mutex
+	hdr page.Header // the header as of the last commit
+	// last is the number of that commit. It changes with hdr, under mu.
+	// The log counts a commit as soon as its frames are synced, before
+	// hdr changes; a snapshot that took the log's number with hdr would
+	// read the pages of one commit with the header of the one before.
+	last    int
 	readers map[int]int // open snapshots per commit number
 	closed  bool
 }
@@ -71,6 +87,9 @@ func Open(fs vfs.FS, name string, opt Options) (s *Store, err error) {
 		return nil, err
 	}
 	if !exists {
+		if opt.ReadOnly {
+			return nil, fmt.Errorf("store: %s: %w", name, os.ErrNotExist)
+		}
 		if err := create(fs, name, opt); err != nil {
 			return nil, err
 		}
@@ -79,7 +98,7 @@ func Open(fs vfs.FS, name string, opt Options) (s *Store, err error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err = open(fs, name, db)
+	s, err = open(fs, name, db, opt.ReadOnly)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -147,7 +166,7 @@ func create(fs vfs.FS, name string, opt Options) error {
 	return fs.Rename(tmp, name)
 }
 
-func open(fs vfs.FS, name string, db vfs.File) (*Store, error) {
+func open(fs vfs.FS, name string, db vfs.File, readOnly bool) (*Store, error) {
 	logName := name + "-log"
 	logExists, err := fs.Exists(logName)
 	if err != nil {
@@ -157,9 +176,11 @@ func open(fs vfs.FS, name string, db vfs.File) (*Store, error) {
 	if herr != nil && !(errors.Is(herr, page.ErrDamaged) && logExists) {
 		return nil, herr
 	}
-	logf, err := fs.Open(logName)
-	if err != nil {
-		return nil, err
+	var logf vfs.File = emptyFile{}
+	if logExists || !readOnly {
+		if logf, err = fs.Open(logName); err != nil {
+			return nil, err
+		}
 	}
 	ps := h.PageSize
 	if herr != nil {
@@ -170,7 +191,11 @@ func open(fs vfs.FS, name string, db vfs.File) (*Store, error) {
 			return nil, fmt.Errorf("%w; the log cannot replace it: %v", herr, err)
 		}
 	}
-	l, rec, err := wal.Open(logf, ps)
+	openLog := wal.Open
+	if readOnly {
+		openLog = wal.OpenReadOnly
+	}
+	l, rec, err := openLog(logf, ps)
 	if err != nil {
 		logf.Close()
 		return nil, err
@@ -197,8 +222,18 @@ func open(fs vfs.FS, name string, db vfs.File) (*Store, error) {
 		logf.Close()
 		return nil, fmt.Errorf("%w; the log holds no image of it", herr)
 	}
-	return &Store{db: db, logf: logf, log: l, pageSize: ps, hdr: h, readers: map[int]int{}, recovered: rec}, nil
+	return &Store{db: db, logf: logf, log: l, pageSize: ps, hdr: h, readers: map[int]int{}, recovered: rec, readOnly: readOnly, last: l.Last()}, nil
 }
+
+// emptyFile stands for a log that does not exist, in read-only mode.
+type emptyFile struct{}
+
+func (emptyFile) ReadAt([]byte, int64) (int, error)  { return 0, io.EOF }
+func (emptyFile) WriteAt([]byte, int64) (int, error) { return 0, ErrReadOnly }
+func (emptyFile) Sync() error                        { return ErrReadOnly }
+func (emptyFile) Truncate(int64) error               { return ErrReadOnly }
+func (emptyFile) Size() (int64, error)               { return 0, nil }
+func (emptyFile) Close() error                       { return nil }
 
 // Recovered returns what Open found in the log: the complete commits, and
 // the bytes after them that it ignored.
@@ -263,13 +298,16 @@ func (s *Store) Snapshot() (*Snapshot, error) {
 	if s.closed {
 		return nil, ErrClosed
 	}
-	c := s.log.Last()
+	c := s.last
 	s.readers[c]++
 	return &Snapshot{s: s, commit: c, hdr: s.hdr}, nil
 }
 
 // Count returns the page count as of the snapshot.
 func (r *Snapshot) Count() uint64 { return r.hdr.PageCount }
+
+// Header returns the header as of the snapshot.
+func (r *Snapshot) Header() page.Header { return r.hdr }
 
 // FreeCount returns the number of free pages as of the snapshot.
 func (r *Snapshot) FreeCount() uint64 { return r.hdr.FreeCount }
@@ -336,6 +374,9 @@ type Tx struct {
 // Begin starts the write transaction. It waits while another one or a
 // checkpoint runs.
 func (s *Store) Begin() (*Tx, error) {
+	if s.readOnly {
+		return nil, ErrReadOnly
+	}
 	s.writer.Lock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -503,7 +544,7 @@ func (t *Tx) Commit() error {
 		return err
 	}
 	t.s.mu.Lock()
-	t.s.hdr = t.hdr
+	t.s.hdr, t.s.last = t.hdr, t.s.log.Last()
 	t.s.mu.Unlock()
 	return nil
 }
@@ -524,6 +565,9 @@ func (t *Tx) Rollback() {
 // need an older page, and the file must not change under it (D-2). It
 // waits for the writer.
 func (s *Store) Checkpoint() (bool, error) {
+	if s.readOnly {
+		return false, ErrReadOnly
+	}
 	s.writer.Lock()
 	defer s.writer.Unlock()
 	s.mu.Lock()

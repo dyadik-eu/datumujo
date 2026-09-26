@@ -346,6 +346,42 @@ the middle of the log hid both commits. The first version of the check
 said intact. With step 10a, the same flip in the first commit
 refuses the log and names the frame.
 
+## Backup and restore
+
+A backup is one snapshot written to a new file (O-1). The program goes on
+writing meanwhile. The snapshot stops checkpoints until the copy is done,
+as any long reader does (T-5). The copy holds every page as of one commit
+and has no log.
+
+The copy goes to TARGET-new and is synced. Then the check command reads
+it. Only a copy that the check accepts is renamed to TARGET. So a file
+under the target name is always whole and sound, also after a power loss
+in the middle (O-2).
+
+A backup never replaces a file. If TARGET or TARGET-log exists, it fails.
+A log next to a copy would be applied to it when it opens. Files of a
+copy that did not finish are removed first.
+
+A restore is a backup of a database that no program has open. It opens
+the source read-only. The command is `datumujo backup FILE COPY` or
+`datumujo restore COPY FILE`. A program that has the database open calls
+backup.Backup.
+
+### Read-only open
+
+The check, the backup and the restore read a database without a change
+to it. Read-only open creates no file and starts no log. A missing log
+stands as an empty one in memory. Begin and Checkpoint fail. It still
+takes the lock file, so no program writes to the database meanwhile.
+
+### A snapshot takes the header of its commit
+
+The store keeps the number of the last commit next to its header, and
+changes both at once when a commit is done. The log counts a commit when
+its frames are synced, before that. A snapshot that took the number from
+the log read pages of one commit with the header of the one before. The
+first backup test found this.
+
 ## One process, one writer
 
 The database runs in one process (S-1). Inside the process, one write

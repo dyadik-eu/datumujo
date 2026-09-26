@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -983,5 +984,155 @@ func TestFreePages(t *testing.T) {
 	snap.hdr.FreeCount = 4
 	if _, err := snap.FreePages(); !errors.As(err, &de) || de.Page != 9999 || !strings.Contains(err.Error(), "reaches page") {
 		t.Errorf("a next page past the end: %v", err)
+	}
+}
+
+// TestReadOnly opens a database read-only. A missing file is not created.
+// Commits in the log are read, and nothing is written: no log is started,
+// no commit and no checkpoint runs.
+func TestReadOnly(t *testing.T) {
+	fs := vfs.NewSim()
+	if _, err := Open(fs, "db", Options{ReadOnly: true}); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing file: %v", err)
+	}
+	if ok, _ := fs.Exists("db"); ok {
+		t.Fatal("read-only open created the file")
+	}
+	s, err := Open(fs, "db", Options{PageSize: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, _ := s.Begin()
+	no, _ := tx.Allocate()
+	if err := tx.Write(no, []byte("in the log")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	sizes := func() string {
+		out := ""
+		for _, n := range []string{"db", "db-log"} {
+			f, _ := fs.Open(n)
+			size, _ := f.Size()
+			f.Close()
+			out += fmt.Sprint(n, "=", size, " ")
+		}
+		return out
+	}
+	before := sizes()
+	r, err := Open(fs, "db", Options{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := r.Snapshot()
+	buf := make([]byte, 512)
+	if err := snap.Read(no, buf); err != nil || !strings.HasPrefix(string(buf), "in the log") {
+		t.Fatalf("page from the log: %v %q", err, buf[:10])
+	}
+	snap.Close()
+	if _, err := r.Begin(); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := r.Checkpoint(); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	r.Close()
+	if after := sizes(); after != before {
+		t.Fatalf("read-only open changed the files: %s, then %s", before, after)
+	}
+	// Without a log file, read-only uses an empty log and creates none.
+	s, _ = Open(fs, "db", Options{})
+	if ok, err := s.Checkpoint(); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	s.Close()
+	if err := fs.Remove("db-log"); err != nil {
+		t.Fatal(err)
+	}
+	r, err = Open(fs, "db", Options{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, _ = r.Snapshot()
+	if err := snap.Read(no, buf); err != nil || !strings.HasPrefix(string(buf), "in the log") {
+		t.Fatalf("page from the file: %v", err)
+	}
+	snap.Close()
+	r.Close()
+	if ok, _ := fs.Exists("db-log"); ok {
+		t.Fatal("read-only open created a log")
+	}
+}
+
+// TestSnapshotDuringCommit takes snapshots while commits run. Each commit
+// adds a page at the end and points page 1 at it. A snapshot must see the
+// header of the commit whose pages it reads, so the page that page 1
+// points at is inside its page count.
+func TestSnapshotDuringCommit(t *testing.T) {
+	s, err := Open(vfs.NewSim(), "db", Options{PageSize: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tx, _ := s.Begin()
+	first, _ := tx.Allocate()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error)
+	go func() {
+		for i := 0; i < 2000; i++ {
+			tx, err := s.Begin()
+			if err != nil {
+				done <- err
+				return
+			}
+			no, err := tx.Allocate()
+			if err == nil {
+				err = tx.Write(no, []byte("new"))
+			}
+			if err == nil {
+				err = tx.Write(first, binary.BigEndian.AppendUint64(nil, no))
+			}
+			if err == nil {
+				err = tx.Commit()
+			}
+			if err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	buf := make([]byte, 512)
+	seen := 0
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			if seen == 0 {
+				t.Fatal("no snapshot saw a pointer")
+			}
+			return
+		default:
+		}
+		snap, err := s.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := snap.Read(first, buf); err != nil {
+			t.Fatal(err)
+		}
+		if p := binary.BigEndian.Uint64(buf); p != 0 {
+			seen++
+			if p >= snap.Count() {
+				t.Fatalf("page %d points at page %d; the snapshot has %d pages", first, p, snap.Count())
+			}
+		}
+		snap.Close()
 	}
 }

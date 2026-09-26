@@ -662,3 +662,26 @@ func TestResetLeavesNoOldFrames(t *testing.T) {
 		t.Fatalf("%d of %d power losses in a Reset left bytes behind a new header", tails, (calls-start+1)*64)
 	}
 }
+
+// TestOpenReadOnly opens an empty file read-only. It stays empty, and
+// Commit and Reset fail.
+func TestOpenReadOnly(t *testing.T) {
+	s := vfs.NewSim()
+	f, _ := s.Open("log")
+	l, rec, err := OpenReadOnly(f, ps)
+	if err != nil || rec.Commits != 0 || rec.Ignored != 0 {
+		t.Fatalf("%v %+v", err, rec)
+	}
+	if err := l.Commit([]Page{{1, img(1, 1)}}, 2); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := l.Reset(); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("reset: %v", err)
+	}
+	if n, _ := f.Size(); n != 0 {
+		t.Fatalf("the file has %d bytes", n)
+	}
+	if ok, err := l.Read(1, l.Last(), make([]byte, ps)); ok || err != nil {
+		t.Fatalf("read: %v %v", ok, err)
+	}
+}
