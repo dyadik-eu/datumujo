@@ -29,11 +29,22 @@ const DefaultPageSize = 4096
 // Options are used when Open creates a file.
 type Options struct {
 	PageSize int // 0 means DefaultPageSize
+	// MaxTxBytes bounds the changed pages a transaction holds (D-3). 0
+	// means DefaultMaxTxBytes. A page past it fails with ErrTxTooLarge.
+	MaxTxBytes int64
 	// ReadOnly opens an existing database and writes nothing to it: no
 	// file is created, the log is not started or cut, and Begin and
 	// Checkpoint fail. The lock file is still taken.
 	ReadOnly bool
 }
+
+// DefaultMaxTxBytes is the bound on the changed pages of a transaction
+// when Options.MaxTxBytes is 0.
+const DefaultMaxTxBytes = 16 << 20
+
+// ErrTxTooLarge is returned when a transaction would hold more changed
+// pages than the bound. The transaction is then to be rolled back.
+var ErrTxTooLarge = errors.New("store: the transaction passes its memory bound")
 
 // ErrReadOnly is returned by Begin and Checkpoint on a store opened
 // read-only.
@@ -52,6 +63,7 @@ type Store struct {
 
 	recovered wal.Recovered // what Open found in the log
 	readOnly  bool
+	maxTx     int64 // bound on the changed pages of a transaction
 
 	mu  sync.Mutex
 	hdr page.Header // the header as of the last commit
@@ -104,6 +116,10 @@ func Open(fs vfs.FS, name string, opt Options) (s *Store, err error) {
 		return nil, err
 	}
 	s.unlock = unlock
+	s.maxTx = opt.MaxTxBytes
+	if s.maxTx == 0 {
+		s.maxTx = DefaultMaxTxBytes
+	}
 	return s, nil
 }
 
@@ -455,9 +471,36 @@ func (t *Tx) Write(no uint64, payload []byte) error {
 	if len(payload) > t.s.Payload() {
 		return fmt.Errorf("store: %d bytes of content, a page holds %d", len(payload), t.s.Payload())
 	}
+	if err := t.room(no); err != nil {
+		return err
+	}
 	p := make([]byte, t.s.pageSize)
 	copy(p, payload)
 	t.dirty[no] = p
+	return nil
+}
+
+// Changed returns the number of pages the transaction has changed, the
+// header not counted. MaxTxBytes bounds it times the page size.
+func (t *Tx) Changed() int {
+	n := len(t.dirty)
+	if _, ok := t.dirty[0]; ok {
+		n--
+	}
+	return n
+}
+
+// room fails if changing page no would take the transaction past its
+// bound. A page already changed costs nothing more. The header is not
+// counted: it is one page, and every transaction has it.
+func (t *Tx) room(no uint64) error {
+	if _, ok := t.dirty[no]; ok {
+		return nil
+	}
+	n := t.Changed()
+	if int64(n+1)*int64(t.s.pageSize) > t.s.maxTx {
+		return fmt.Errorf("%w: %d pages of %d bytes, at most %d bytes", ErrTxTooLarge, n+1, t.s.pageSize, t.s.maxTx)
+	}
 	return nil
 }
 
@@ -475,11 +518,17 @@ func (t *Tx) Allocate() (uint64, error) {
 	}
 	if t.hdr.FreeCount == 0 {
 		no := t.hdr.PageCount
+		if err := t.room(no); err != nil {
+			return 0, err
+		}
 		t.hdr.PageCount++
 		t.dirty[no] = make([]byte, t.s.pageSize)
 		return no, nil
 	}
 	no := t.hdr.FreeHead
+	if err := t.room(no); err != nil {
+		return 0, err
+	}
 	buf := make([]byte, t.s.pageSize)
 	if err := t.Read(no, buf); err != nil {
 		return 0, err
@@ -509,6 +558,9 @@ func (t *Tx) Free(no uint64) error {
 	}
 	if t.freed[no] {
 		return fmt.Errorf("store: page %d freed twice", no)
+	}
+	if err := t.room(no); err != nil {
+		return err
 	}
 	p := make([]byte, t.s.pageSize)
 	copy(p, freeMark[:])
