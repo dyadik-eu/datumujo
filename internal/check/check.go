@@ -44,9 +44,11 @@ type TableStats struct {
 	Indexes []IndexStats
 }
 
-// Stats describes the file.
+// Stats describes the file. Only the sizes are measured when the database
+// could not be opened; Opened tells.
 type Stats struct {
 	FileBytes, LogBytes int64
+	Opened              bool
 	PageSize            int
 	Pages               uint64 // pages of the database, the header included
 	FreePages           uint64
@@ -104,13 +106,14 @@ func Run(fs vfs.FS, name string) (*Report, error) {
 		return nil, cannot(err)
 	}
 	defer s.Close()
+	r.Stats.Opened = true
 	// Bytes after the last complete commit are a commit that did not
-	// finish, or damage in a frame. The log cannot tell the two apart, and
-	// with damage, every commit after the frame is lost. The next commit
-	// cuts the bytes. So this is a finding: after a crash a false alarm,
-	// after damage the one warning there is.
+	// finish, or damage in the last commit. Opening refuses damage with a
+	// later commit behind it; in the last commit, the log cannot tell the
+	// two apart. The next commit cuts the bytes. So this is a finding:
+	// after a crash a false alarm, after damage the one warning there is.
 	if n := s.Recovered().Ignored; n > 0 {
-		r.Findings = append(r.Findings, Finding{What: fmt.Sprintf("the log has %d bytes after its last complete commit: a commit that did not finish, or damage that hides every commit after it; the next commit cuts them", n)})
+		r.Findings = append(r.Findings, Finding{What: fmt.Sprintf("the log has %d bytes after its last complete commit: a commit that did not finish, or damage in the last commit; the next commit cuts them", n)})
 	}
 	snap, err := s.Snapshot()
 	if err != nil {
