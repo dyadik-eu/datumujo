@@ -879,3 +879,109 @@ func TestRoots(t *testing.T) {
 		t.Errorf("roots after reopen: %v", st.roots)
 	}
 }
+
+// TestFreePages checks the walk of the free list. The pages freed last
+// come first. A damaged list is an error that names the page.
+func TestFreePages(t *testing.T) {
+	s, err := Open(vfs.NewSim(), "db", Options{PageSize: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tx, _ := s.Begin()
+	var pages []uint64
+	for i := 0; i < 4; i++ {
+		no, err := tx.Allocate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages = append(pages, no)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	tx, _ = s.Begin()
+	for _, no := range pages[:3] {
+		if err := tx.Free(no); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := s.Snapshot()
+	got, err := snap.FreePages()
+	snap.Close()
+	if err != nil || fmt.Sprint(got) != fmt.Sprint([]uint64{pages[2], pages[1], pages[0]}) {
+		t.Fatalf("free pages %v %v, want the freed ones, last first", got, err)
+	}
+	tx, _ = s.Begin()
+	if err := tx.Write(pages[1], []byte("not free")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ = s.Snapshot()
+	var de *page.DamagedError
+	if got, err := snap.FreePages(); !errors.As(err, &de) || de.Page != pages[1] || len(got) != 1 {
+		t.Fatalf("a free page without its mark: %v %v", got, err)
+	}
+	snap.Close()
+
+	// A list that does not end after FreeCount pages, one than ends too
+	// early, and a loop. The header copy of the snapshot is changed here;
+	// on the disk, damage does it.
+	tx, _ = s.Begin()
+	loop := make([]byte, 16)
+	copy(loop, freeMark[:])
+	binary.BigEndian.PutUint64(loop[8:], pages[2])
+	if err := tx.Write(pages[1], append(append([]byte(nil), freeMark[:]...), binary.BigEndian.AppendUint64(nil, pages[0])...)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(r *Snapshot){
+		"one page short": func(r *Snapshot) { r.hdr.FreeCount-- },
+		"one page more":  func(r *Snapshot) { r.hdr.FreeCount++ },
+	} {
+		snap, _ := s.Snapshot()
+		change(snap)
+		if _, err := snap.FreePages(); !errors.Is(err, page.ErrDamaged) {
+			t.Errorf("%s: %v", name, err)
+		}
+		snap.Close()
+	}
+	tx, _ = s.Begin()
+	if err := tx.Write(pages[0], loop); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ = s.Snapshot()
+	snap.hdr.FreeCount = 10
+	if _, err := snap.FreePages(); !errors.Is(err, page.ErrDamaged) || !strings.Contains(err.Error(), "reaches page") {
+		t.Errorf("a loop: %v", err)
+	}
+	snap.Close()
+
+	// A next page past the end of the file is damage, not a read error.
+	tx, _ = s.Begin()
+	past := append(append([]byte(nil), freeMark[:]...), binary.BigEndian.AppendUint64(nil, 9999)...)
+	if err := tx.Write(pages[0], past); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// With one free page more in the header, the walk goes on to page
+	// 9999 instead of ending there.
+	snap, _ = s.Snapshot()
+	defer snap.Close()
+	snap.hdr.FreeCount = 4
+	if _, err := snap.FreePages(); !errors.As(err, &de) || de.Page != 9999 || !strings.Contains(err.Error(), "reaches page") {
+		t.Errorf("a next page past the end: %v", err)
+	}
+}

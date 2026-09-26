@@ -17,6 +17,7 @@ The design is in [design.md](design.md).
 | 8 | Typed tables: schema in the file, column types, null, row encoding, primary key, schema changes with a version | M-1, M-7 |
 | 9 | Indexes and scans: secondary and unique indexes, range and prefix scans, cursors, counters | M-2, M-3, M-4, M-5, M-6 |
 | 10 | Check command, damage test, statistics | I-2, P-3, O-3 |
+| 10a | Log: tell a damaged frame from a commit that did not finish; refuse to open a damaged log instead of cutting it | I-1, T-4, P-3 (log) |
 | 11 | Backup while writes go on, restore | O-1, O-2 |
 | 12 | Load test with the metadata of the in-toto repositories; memory bound per transaction | P-5, D-3 |
 

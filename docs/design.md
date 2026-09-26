@@ -290,6 +290,45 @@ also not after a crash. A value given in a transaction that rolls back is
 given again, because nothing outside the transaction has seen it commit.
 Counters do not change the schema version.
 
+## Checking a file
+
+`datumujo check FILE` reads the whole database. It exits 0 when the file
+is intact, 1 on a finding, and 2 when it could not check (I-2). It does
+not create a missing file, and it writes nothing: opening the database
+cuts no log, only the next commit does.
+
+The check runs two passes.
+
+1. It reads every page and reports each whose checksum fails. This pass
+   depends on no structure, so it finds a damaged page that no tree
+   reaches.
+2. It walks the structures: the free list, the catalog, and each table
+   and index with the tree check. It reads every row, and every entry of
+   every index against its row. An index must have one entry for each
+   row.
+
+If every structure was walked to its end, each page but the header must
+belong to exactly one of them. A page used twice, or used by nothing, is
+a finding. A root slot that no structure uses is a finding too.
+
+The report also gives statistics (O-3): the size of the file and the log,
+and the number of pages and free pages. For each table and index, it
+gives the rows or entries and the pages.
+
+### Damage in the log
+
+A frame whose checksum fails ends the recovery of the log. The log cannot
+tell such a frame from a commit that did not finish before a crash. With
+damage, every commit after the frame is lost, and the next commit cuts
+the bytes for good. So bytes after the last complete commit are a
+finding, not a note. After a crash that is a false alarm; after damage it
+is the only warning.
+
+Measured on 26.09.2026 with 1000 rows in two commits: one flipped bit in
+the middle of the log hid both commits. Before this finding, the check
+said intact. Step 10a of the roadmap is to tell the two cases apart and
+not to cut a damaged log.
+
 ## One process, one writer
 
 The database runs in one process (S-1). Inside the process, one write

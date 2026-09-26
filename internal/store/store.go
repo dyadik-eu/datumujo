@@ -40,6 +40,8 @@ type Store struct {
 	// writer is held by the one Tx and by Checkpoint.
 	writer sync.Mutex
 
+	recovered wal.Recovered // what Open found in the log
+
 	mu      sync.Mutex
 	hdr     page.Header // the header as of the last commit
 	readers map[int]int // open snapshots per commit number
@@ -168,7 +170,7 @@ func open(fs vfs.FS, name string, db vfs.File) (*Store, error) {
 			return nil, fmt.Errorf("%w; the log cannot replace it: %v", herr, err)
 		}
 	}
-	l, _, err := wal.Open(logf, ps)
+	l, rec, err := wal.Open(logf, ps)
 	if err != nil {
 		logf.Close()
 		return nil, err
@@ -195,8 +197,12 @@ func open(fs vfs.FS, name string, db vfs.File) (*Store, error) {
 		logf.Close()
 		return nil, fmt.Errorf("%w; the log holds no image of it", herr)
 	}
-	return &Store{db: db, logf: logf, log: l, pageSize: ps, hdr: h, readers: map[int]int{}}, nil
+	return &Store{db: db, logf: logf, log: l, pageSize: ps, hdr: h, readers: map[int]int{}, recovered: rec}, nil
 }
+
+// Recovered returns what Open found in the log: the complete commits, and
+// the bytes after them that it ignored.
+func (s *Store) Recovered() wal.Recovered { return s.recovered }
 
 // Close closes the files. Open snapshots and transactions must be closed
 // before.
@@ -270,6 +276,34 @@ func (r *Snapshot) FreeCount() uint64 { return r.hdr.FreeCount }
 
 // Root returns root slot i as of the snapshot, 0 if unused.
 func (r *Snapshot) Root(i int) uint64 { return r.hdr.Root[i] }
+
+// FreePages walks the free list and returns its pages, the head first. It
+// checks each page as Allocate does: the mark, a next page inside the
+// file, and a list that ends exactly after FreeCount pages.
+func (r *Snapshot) FreePages() ([]uint64, error) {
+	var out []uint64
+	seen := map[uint64]bool{}
+	buf := make([]byte, r.s.pageSize)
+	no := r.hdr.FreeHead
+	for left := r.hdr.FreeCount; left > 0; left-- {
+		if no == 0 || no >= r.hdr.PageCount || seen[no] {
+			return out, &page.DamagedError{Page: no, Reason: fmt.Sprintf("the free list reaches page %d with %d free pages left", no, left)}
+		}
+		seen[no] = true
+		if err := r.Read(no, buf); err != nil {
+			return out, err
+		}
+		if string(buf[:8]) != string(freeMark[:]) {
+			return out, &page.DamagedError{Page: no, Reason: "on the free list, but not marked free"}
+		}
+		out = append(out, no)
+		no = binary.BigEndian.Uint64(buf[8:])
+	}
+	if no != 0 {
+		return out, &page.DamagedError{Page: no, Reason: fmt.Sprintf("the free list goes on past its %d pages", r.hdr.FreeCount)}
+	}
+	return out, nil
+}
 
 // Read reads page no into buf, which must be one page long. The content is
 // buf[:Payload()]; the rest is the checksum.
