@@ -480,8 +480,10 @@ func TestLogTailIsAFinding(t *testing.T) {
 }
 
 // TestEveryFlipInTheLogIsReported flips one bit in each frame of a log
-// that holds two commits. The check reports each: as the log header, or
-// as bytes after the last complete commit. The check changes no file.
+// that holds two commits. A flip in the first commit is damage that the
+// second commit shows, and the log is refused. A flip in the last commit
+// looks like a commit that did not finish and is reported as bytes after
+// the last complete commit. The check changes no file.
 func TestEveryFlipInTheLogIsReported(t *testing.T) {
 	dir := t.TempDir()
 	orig := filepath.Join(dir, "orig")
@@ -490,7 +492,15 @@ func TestEveryFlipInTheLogIsReported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var firstEnd int64 // the size of the log after the first commit
 	for i := int64(0); i < 2; i++ {
+		if i == 1 {
+			info, err := os.Stat(orig + "-log")
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstEnd = info.Size()
+		}
 		stx, _ := s.Begin()
 		tx, _ := table.Begin(stx, pageSize)
 		if err := tx.Insert("issue", table.Row{1000 + i, "open", nil, strings.Repeat("x", pageSize)}); err != nil {
@@ -505,11 +515,12 @@ func TestEveryFlipInTheLogIsReported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Header of 28 bytes, frames of 20 bytes and a page.
-	const frame = 20 + pageSize
+	// Header of 28 bytes, frames of 28 bytes and a page.
+	const frame = 28 + pageSize
 	frames := (info.Size() - 28) / frame
-	if frames < 4 {
-		t.Fatalf("the log holds %d frames", frames)
+	firstFrames := (firstEnd - 28) / frame
+	if (info.Size()-28)%frame != 0 || firstFrames < 2 || frames-firstFrames < 2 {
+		t.Fatalf("the log holds %d bytes, %d frames, %d in the first commit", info.Size(), frames, firstFrames)
 	}
 	// Each byte of the log header. A flip in the magic or the version makes
 	// the log unreadable as a log: the check cannot check and says so. Any
@@ -534,12 +545,16 @@ func TestEveryFlipInTheLogIsReported(t *testing.T) {
 		flip(t, name+"-log", (28+f*frame+rng.Int63n(frame))*8)
 		before, _ := os.ReadFile(name + "-log")
 		r := run(t, vfs.OS{}, name)
-		if len(r.Findings) == 0 {
-			t.Fatalf("frame %d flipped: no finding", f)
+		want := "log is damaged"
+		if f >= firstFrames {
+			want = "bytes after its last complete commit"
+		}
+		if len(r.Findings) != 1 || !strings.Contains(r.Findings[0].What, want) {
+			t.Fatalf("frame %d of %d, %d in the first commit: findings %v, want %q", f, frames, firstFrames, r.Findings, want)
 		}
 		if after, _ := os.ReadFile(name + "-log"); string(after) != string(before) {
 			t.Fatalf("frame %d: the check changed the log", f)
 		}
 	}
-	t.Logf("28 header bytes and %d frames, each flipped once: none intact", frames)
+	t.Logf("28 header bytes and %d frames, %d in the first commit, each flipped once: none intact", frames, firstFrames)
 }

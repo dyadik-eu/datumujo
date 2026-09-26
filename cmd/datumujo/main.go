@@ -38,12 +38,16 @@ func run(fs vfs.FS, args []string, stdout, stderr io.Writer) int {
 	}
 	st := r.Stats
 	fmt.Fprintf(stdout, "file: %d bytes, log: %d bytes\n", st.FileBytes, st.LogBytes)
-	fmt.Fprintf(stdout, "pages: %d of %d bytes, %d free, %d in the catalog\n", st.Pages, st.PageSize, st.FreePages, st.CatalogPages)
-	fmt.Fprintf(stdout, "schema version: %d\n", st.SchemaVersion)
-	for _, t := range st.Tables {
-		fmt.Fprintf(stdout, "table %s: %d rows, %d pages\n", t.Name, t.Rows, t.Pages)
-		for _, ix := range t.Indexes {
-			fmt.Fprintf(stdout, "  index %s: %d entries, %d pages\n", ix.Name, ix.Entries, ix.Pages)
+	if !st.Opened {
+		fmt.Fprintln(stdout, "the database could not be opened; nothing else was counted")
+	} else {
+		fmt.Fprintf(stdout, "pages: %d of %d bytes, %d free, %d in the catalog\n", st.Pages, st.PageSize, st.FreePages, st.CatalogPages)
+		fmt.Fprintf(stdout, "schema version: %d\n", st.SchemaVersion)
+		for _, t := range st.Tables {
+			fmt.Fprintf(stdout, "table %s: %d rows, %d pages\n", t.Name, t.Rows, t.Pages)
+			for _, ix := range t.Indexes {
+				fmt.Fprintf(stdout, "  index %s: %d entries, %d pages\n", ix.Name, ix.Entries, ix.Pages)
+			}
 		}
 	}
 	if len(r.Findings) > 0 {

@@ -77,4 +77,30 @@ func TestExitCodes(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("intact: exit %d", code)
 	}
+
+	// A log with a damaged frame and a later commit behind it. The
+	// database does not open, and no count is printed as if it were read.
+	s, _ = store.Open(fs, "db", store.Options{})
+	for k := int64(10); k < 12; k++ {
+		stx, _ = s.Begin()
+		tx, _ = table.Begin(stx, 1024)
+		if err := tx.Insert("t", table.Row{k}); err != nil {
+			t.Fatal(err)
+		}
+		if err := stx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+	f, _ := fs.Open("db-log")
+	b := make([]byte, 1)
+	f.ReadAt(b, 28+28+100)
+	b[0] ^= 1
+	f.WriteAt(b, 28+28+100)
+	f.Sync()
+	f.Close()
+	code, stdout, _ = exit("check", "db")
+	if code != 1 || !strings.Contains(stdout, "log is damaged") || !strings.Contains(stdout, "could not be opened") || strings.Contains(stdout, "pages:") {
+		t.Fatalf("damaged log: exit %d, %q", code, stdout)
+	}
 }

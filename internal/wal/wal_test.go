@@ -2,9 +2,12 @@ package wal
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"math/rand"
+	"strings"
 	"testing"
 
 	"github.com/dyadik-eu/datumujo/internal/page"
@@ -251,29 +254,121 @@ func TestOldGenerationDoesNotChain(t *testing.T) {
 	}
 }
 
-// TestDamagedFrameEndsTheLog: a flipped bit in a committed frame ends the
-// log before that commit. The log cannot tell this from a commit that did
-// not finish; it reports the bytes it left (design.md).
-func TestDamagedFrameEndsTheLog(t *testing.T) {
+// TestDamagedFrame flips one bit in each field of each frame of two logs.
+// Some commits have one frame only, so that a damaged checksum field has
+// no second frame in its commit to hide behind. A flip before the last
+// commit is refused: a later commit shows that the damaged one was
+// complete. A flip in the last commit looks like a commit that did not
+// finish (design.md). The log opens without it and reports the bytes it
+// left.
+func TestDamagedFrame(t *testing.T) {
+	type commit struct {
+		pages []Page
+		count uint64
+	}
+	layouts := map[string][]commit{
+		// The fourth commit also shows the damage, whatever the third.
+		"four commits": {
+			{[]Page{{1, img(1, 1)}, {2, img(2, 1)}}, 3},
+			{[]Page{{3, img(3, 1)}}, 4},
+			{[]Page{{1, img(1, 2)}, {4, img(4, 1)}}, 5},
+			{[]Page{{2, img(2, 2)}}, 5},
+		},
+		// Only the third commit can show damage in the checksum field of
+		// the second. It must chain to the checksum computed from the
+		// content of the second frame.
+		"two one-frame commits last": {
+			{[]Page{{1, img(1, 1)}, {2, img(2, 1)}}, 3},
+			{[]Page{{3, img(3, 1)}}, 4},
+			{[]Page{{2, img(2, 2)}}, 4},
+		},
+	}
+	frame := int64(frameHeaderSize + ps)
+	fields := map[string]int64{"page number": 3, "page count": 12, "commit number": 20, "checksum": 26, "page image": frameHeaderSize + 100}
+	for name, commits := range layouts {
+		frames := int64(0)
+		for _, c := range commits {
+			frames += int64(len(c.pages))
+		}
+		last := int64(len(commits[len(commits)-1].pages))
+		for f := int64(0); f < frames; f++ {
+			for field, at := range fields {
+				s := vfs.NewSim()
+				l, _ := open(t, s)
+				for _, c := range commits {
+					if err := l.Commit(c.pages, c.count); err != nil {
+						t.Fatal(err)
+					}
+				}
+				g, _ := s.Open("log")
+				off := int64(headerSize) + f*frame + at
+				b := make([]byte, 1)
+				g.ReadAt(b, off)
+				b[0] ^= 0x04
+				g.WriteAt(b, off)
+				g.Sync()
+				after, err := s.Crash(nil).Open("log")
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, rec, err := Open(after, ps)
+				var d *DamagedError
+				inLast := f >= frames-last
+				switch {
+				case !inLast && (!errors.As(err, &d) || !strings.Contains(err.Error(), fmt.Sprintf("frame at byte %d ", int64(headerSize)+f*frame))):
+					t.Errorf("%s, frame %d, %s: %v, %+v; want the log refused, naming the frame", name, f, field, err, rec)
+				case inLast && (err != nil || rec.Commits != len(commits)-1 || rec.Ignored != last*frame):
+					t.Errorf("%s, frame %d in the last commit, %s: %v, %+v", name, f, field, err, rec)
+				}
+			}
+		}
+	}
+}
+
+// TestWrongCommitNumber writes a frame that chains but carries a commit
+// number out of order. Open does not use it as the next commit. As a
+// number after the next one, it shows a later commit and the log is
+// refused.
+func TestWrongCommitNumber(t *testing.T) {
 	s := vfs.NewSim()
 	l, _ := open(t, s)
-	l.Commit([]Page{{1, img(1, 1)}}, 2)
-	l.Commit([]Page{{2, img(2, 1)}}, 3)
-	l.Commit([]Page{{3, img(3, 1)}}, 4)
-	f, _ := s.Open("log")
-	frame := int64(frameHeaderSize + ps)
-	off := int64(headerSize) + frame + 100 // inside the second commit
-	b := make([]byte, 1)
-	f.ReadAt(b, off)
-	b[0] ^= 1
-	f.WriteAt(b, off)
-	f.Sync()
-	l2, rec := open(t, s.Crash(nil))
-	if rec.Commits != 1 || rec.Ignored != 2*frame {
-		t.Errorf("after damage: %+v", rec)
+	if err := l.Commit([]Page{{1, img(1, 1)}}, 2); err != nil {
+		t.Fatal(err)
 	}
-	if got := read(t, l2, allPages); len(got.pages) != 1 {
-		t.Errorf("after damage: %v", got)
+	fr := make([]byte, frameHeaderSize+ps)
+	binary.BigEndian.PutUint64(fr[0:], 1)
+	binary.BigEndian.PutUint64(fr[8:], 2)
+	binary.BigEndian.PutUint64(fr[16:], 5)
+	copy(fr[frameHeaderSize:], img(1, 2))
+	binary.BigEndian.PutUint32(fr[24:], frameSum(l.salt, l.chain, fr))
+	g, _ := s.Open("log")
+	g.WriteAt(fr, l.end)
+	g.Sync()
+	after, _ := s.Crash(nil).Open("log")
+	var d *DamagedError
+	if _, rec, err := Open(after, ps); !errors.As(err, &d) {
+		t.Fatalf("a chained frame of commit 5 after commit 1: %v, %+v", err, rec)
+	}
+}
+
+// TestOldVersionRejected writes a log header of format version 1. Open
+// rejects it: version 1 frames have no commit number.
+func TestOldVersionRejected(t *testing.T) {
+	s := vfs.NewSim()
+	l, _ := open(t, s)
+	if err := l.Commit([]Page{{1, img(1, 1)}}, 2); err != nil {
+		t.Fatal(err)
+	}
+	g, _ := s.Open("log")
+	hdr := make([]byte, headerSize)
+	g.ReadAt(hdr, 0)
+	binary.BigEndian.PutUint32(hdr[8:], 1)
+	binary.BigEndian.PutUint32(hdr[24:], crc32.Checksum(hdr[:24], castagnoli))
+	g.WriteAt(hdr, 0)
+	g.Sync()
+	after, _ := s.Crash(nil).Open("log")
+	if _, _, err := Open(after, ps); err == nil || !strings.Contains(err.Error(), "format version 1") {
+		t.Fatalf("a log of version 1: %v", err)
 	}
 }
 
@@ -510,5 +605,60 @@ func TestDamageAfterOpenIsFound(t *testing.T) {
 	err := l.Newest(func(uint64, []byte) error { copied++; return nil })
 	if !errors.Is(err, page.ErrDamaged) || copied != 0 {
 		t.Errorf("Newest: %v, %d pages handed out", err, copied)
+	}
+}
+
+// TestResetLeavesNoOldFrames stops a Reset after each of its calls and
+// cuts the power in 64 ways. The log never comes back as a new header
+// with frames of the old generation behind it. Such frames never chain,
+// but they are bytes after the last commit, and the check reports those.
+// Without the sync between the cut and the new header, a power loss could
+// keep the header and lose the cut.
+func TestResetLeavesNoOldFrames(t *testing.T) {
+	var beforeReset int
+	run := func(s *vfs.Sim) {
+		f, err := s.Open("log")
+		if err != nil {
+			return
+		}
+		l, _, err := Open(f, ps)
+		if err != nil {
+			return
+		}
+		if l.Commit([]Page{{1, img(1, 1)}, {2, img(2, 1)}}, 3) != nil || l.Commit([]Page{{3, img(3, 1)}}, 4) != nil {
+			return
+		}
+		beforeReset = s.Calls()
+		l.Reset()
+	}
+	full := vfs.NewSim()
+	run(full)
+	calls, start := full.Calls(), beforeReset
+	if calls-start < 3 {
+		t.Fatalf("Reset made %d calls; the test expects the cut, a sync, the header and a sync", calls-start)
+	}
+	// Only stops inside the Reset: the old log whole, or a new empty one,
+	// are the right outcomes there. Stops before it are the crash test.
+	tails := 0
+	for k := start; k <= calls; k++ {
+		s := vfs.NewSim()
+		s.SetBudget(k)
+		run(s)
+		for power := int64(1); power <= 64; power++ {
+			f, err := s.Crash(rand.New(rand.NewSource(int64(k)*101 + power))).Open("log")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, rec, err := Open(f, ps)
+			if err != nil {
+				t.Fatalf("k %d, power %d: %v", k, power, err)
+			}
+			if rec.Ignored > 0 || rec.Commits != 0 && rec.Commits != 2 {
+				tails++
+			}
+		}
+	}
+	if tails > 0 {
+		t.Fatalf("%d of %d power losses in a Reset left bytes behind a new header", tails, (calls-start+1)*64)
 	}
 }

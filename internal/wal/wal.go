@@ -4,14 +4,24 @@
 // The log file starts with a header, then frames. A frame is a frame
 // header and one page image. The last frame of a commit carries the page
 // count of the database after the commit; the frames before it carry 0.
-// Each frame header holds a checksum over the frame, chained to the
-// checksum of the frame before; the chain starts from the salt in the log
-// header. Open reads the frames in order and uses them up to the last
-// commit frame whose chain holds. The frames after it are from a commit
-// that did not finish, or damaged; Open reports how many bytes it left.
 //
-// A new generation of the log gets a new salt, so frames of an earlier
-// generation that are still in the file do not chain.
+// Each frame header holds the number of its commit in this generation. It
+// also holds a checksum over the salt and the frame, chained to the
+// checksum of the frame before. The chain starts from the salt in the log
+// header. Open reads the frames in order and uses them up to the last
+// commit frame whose chain holds.
+//
+// The bytes after that are a commit that did not finish, or damage. Open
+// tells the two apart where it can. Commits are written one after the
+// other, and each is synced before the next starts. So a frame of a later
+// commit behind the bad frame shows that the bad frame's commit was
+// complete. That is damage, and Open refuses the log.
+//
+// Damage in the last commit looks like a commit that did not finish. Open
+// reports the bytes it left.
+//
+// A new generation of the log gets a new salt, which every frame checksum
+// covers, so frames of an earlier generation never chain.
 //
 // Commits are numbered from 1, and the numbers go on across generations
 // while the Log is open: a reader that holds a commit number from before
@@ -33,7 +43,9 @@ import (
 )
 
 // Version is the format version of the log.
-const Version = 1
+// Version 2 added the commit number to the frame header and the salt to
+// the frame checksum. No release wrote version 1.
+const Version = 2
 
 // Magic starts every log file.
 var Magic = [8]byte{'d', 'a', 't', 'u', 'l', 'o', 'g', 0}
@@ -51,8 +63,9 @@ const headerSize = 28
 //
 //	offset  0  uint64  page number
 //	offset  8  uint64  page count after the commit, 0 if not the last frame
-//	offset 16  uint32  chained checksum
-const frameHeaderSize = 20
+//	offset 16  uint64  number of the commit in this generation, from 1
+//	offset 24  uint32  chained checksum
+const frameHeaderSize = 28
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
@@ -79,6 +92,7 @@ type Log struct {
 	salt     uint64
 	chain    uint32
 	end      int64  // offset after the last committed frame
+	bad      int64  // offset of the frame that ended recovery
 	commits  int    // commits in this generation
 	base     int    // commits of the generations before, while open
 	count    uint64 // page count after the last commit
@@ -95,7 +109,8 @@ type Log struct {
 var ErrNotLog = errors.New("wal: not a log file")
 
 // DamagedError reports a log header that fails its checks while frames
-// follow it. Starting a new log then would drop commits.
+// follow it, or a damaged frame with a later commit behind it. Starting a
+// new log, or cutting the log, would drop commits.
 type DamagedError struct{ Reason string }
 
 func (e *DamagedError) Error() string { return "wal: the log is damaged: " + e.Reason }
@@ -124,7 +139,14 @@ func Open(f vfs.File, pageSize int) (*Log, Recovered, error) {
 		}
 		return l, Recovered{}, l.reset()
 	}
-	return l, l.recover(size), nil
+	rec := l.recover(size)
+	if off, n, err := l.laterCommit(size); err != nil {
+		return nil, Recovered{}, err
+	} else if off >= 0 {
+		return nil, Recovered{}, &DamagedError{fmt.Sprintf("commit %d from byte %d has a frame at byte %d that fails its checksum, and commit %d follows at byte %d, so commit %d was complete",
+			l.commits+1, l.end, l.bad, n, off, l.commits+1)}
+	}
+	return l, rec, nil
 }
 
 func (l *Log) parseHeader(hdr []byte) error {
@@ -156,8 +178,9 @@ func (l *Log) recover(size int64) Recovered {
 		if n, _ := l.f.ReadAt(frame, off); n < len(frame) {
 			break
 		}
-		next := frameSum(chain, frame)
-		if binary.BigEndian.Uint32(frame[16:]) != next {
+		next := frameSum(l.salt, chain, frame)
+		if binary.BigEndian.Uint32(frame[24:]) != next || binary.BigEndian.Uint64(frame[16:]) != uint64(l.commits+1) {
+			l.bad = off
 			break
 		}
 		chain = next
@@ -175,13 +198,46 @@ func (l *Log) recover(size int64) Recovered {
 	return Recovered{Commits: l.commits, Ignored: size - l.end}
 }
 
+// laterCommit looks after the end of the log for a frame of a commit
+// after the next one. It returns its offset and commit number, or -1. A
+// frame counts if it chains to one of two checksums of the frame before.
+//
+// One is the checksum that frame stores, the other is computed from its
+// content. One damaged frame spoils only one of the two. Damage in the
+// content leaves the stored checksum right. Damage in the checksum field
+// leaves the content right.
+func (l *Log) laterCommit(size int64) (int64, uint64, error) {
+	frame := make([]byte, frameHeaderSize+l.pageSize)
+	prev := []uint32{l.chain}
+	for off := l.end; off+int64(len(frame)) <= size; off += int64(len(frame)) {
+		if _, err := l.f.ReadAt(frame, off); err != nil {
+			return 0, 0, err
+		}
+		stored := binary.BigEndian.Uint32(frame[24:])
+		n := binary.BigEndian.Uint64(frame[16:])
+		for _, p := range prev {
+			if frameSum(l.salt, p, frame) == stored && n > uint64(l.commits+1) {
+				return off, n, nil
+			}
+		}
+		// The candidates for the next frame. The computed checksum takes
+		// the stored one of the frame before, as only one frame is
+		// damaged.
+		computed := frameSum(l.salt, prev[0], frame)
+		prev = []uint32{stored, computed}
+	}
+	return -1, 0, nil
+}
+
 // frameSum is the checksum of a frame, chained to prev. It covers the
-// page number, the page count and the page image.
-func frameSum(prev uint32, frame []byte) uint32 {
-	var p [4]byte
-	binary.BigEndian.PutUint32(p[:], prev)
+// salt of the generation, the page number, the page count, the commit
+// number and the page image.
+func frameSum(salt uint64, prev uint32, frame []byte) uint32 {
+	var p [12]byte
+	binary.BigEndian.PutUint64(p[:], salt)
+	binary.BigEndian.PutUint32(p[8:], prev)
 	c := crc32.Update(0, castagnoli, p[:])
-	c = crc32.Update(c, castagnoli, frame[:16])
+	c = crc32.Update(c, castagnoli, frame[:24])
 	return crc32.Update(c, castagnoli, frame[frameHeaderSize:])
 }
 
@@ -197,7 +253,13 @@ func (l *Log) reset() error {
 	binary.BigEndian.PutUint32(hdr[12:], uint32(l.pageSize))
 	copy(hdr[16:], salt[:])
 	binary.BigEndian.PutUint32(hdr[24:], crc32.Checksum(hdr[:24], castagnoli))
+	// The cut is synced before the new header is written. Otherwise a power
+	// loss could keep the header and lose the cut, and leave frames of the
+	// old generation behind the new header.
 	if err := l.f.Truncate(0); err != nil {
+		return err
+	}
+	if err := l.f.Sync(); err != nil {
 		return err
 	}
 	if _, err := l.f.WriteAt(hdr, 0); err != nil {
@@ -264,9 +326,10 @@ func (l *Log) Commit(pages []Page, count uint64) error {
 		if i == len(pages)-1 {
 			binary.BigEndian.PutUint64(frame[8:], count)
 		}
+		binary.BigEndian.PutUint64(frame[16:], uint64(l.commits+1))
 		copy(frame[frameHeaderSize:], p.Data)
-		chain = frameSum(chain, frame)
-		binary.BigEndian.PutUint32(frame[16:], chain)
+		chain = frameSum(l.salt, chain, frame)
+		binary.BigEndian.PutUint32(frame[24:], chain)
 		offsets[p.No] = l.end + int64(len(buf))
 		buf = append(buf, frame...)
 	}

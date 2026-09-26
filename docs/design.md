@@ -29,16 +29,32 @@ frames of its commit, chained to the checksum of the commit before. A frame
 after the last valid commit record is from a commit that did not finish, and
 is ignored (T-4).
 
-Recovery cannot tell a commit that did not finish from damage in the middle
-of the log: in both cases the chain breaks there. Open therefore reports how
-many bytes it left behind, and the check command (I-2) shows them. The next
-commit cuts these bytes off first. Otherwise a short new commit could leave
-old frames behind it. Each of them could continue the chain by a chance of
-2^-32.
+A damaged frame breaks the chain as a commit that did not finish does.
+Open tells the two apart by what follows. Each frame carries the number of
+its commit in the generation. Commits are written one after the other, and
+each is synced before the next starts. So if a frame of a commit after the
+next one follows the break, the commit with the break was complete. That
+is damage, and Open refuses the log: cutting it would drop that commit and
+every later one.
 
-Each generation of the log has a random salt in its header, and the chain
-starts from it. Frames of an earlier generation that are still in the file
-do not chain.
+A frame after the break counts if it chains to the frame before it. Two
+checksums of that frame qualify: the one it stores, and the one computed
+from its content. One damaged frame spoils only one of them. So a single
+flipped bit anywhere before the last commit is found. This holds for a
+checksum field too, and when the next commit has one frame only.
+
+Damage in the last commit remains. It looks exactly like a commit that did
+not finish, because nothing follows it. Open uses the log up to the commit
+before and reports how many bytes it left. The check command (I-2) shows
+them as a finding. The next commit cuts these bytes off first. Otherwise a
+short new commit could leave old frames behind it.
+
+Each generation of the log has a random salt in its header. The chain
+starts from it, and every frame checksum covers it. So frames of an
+earlier generation never chain, not even to each other. A new generation
+cuts the file and syncs the cut before it writes the new header. Otherwise
+a power loss could keep the header and lose the cut, and the old frames
+would stand as bytes after the last commit.
 
 This meets:
 
@@ -317,17 +333,18 @@ gives the rows or entries and the pages.
 
 ### Damage in the log
 
-A frame whose checksum fails ends the recovery of the log. The log cannot
-tell such a frame from a commit that did not finish before a crash. With
-damage, every commit after the frame is lost, and the next commit cuts
-the bytes for good. So bytes after the last complete commit are a
-finding, not a note. After a crash that is a false alarm; after damage it
-is the only warning.
+Damage in a frame with a later commit behind it makes the log refuse to
+open. The check reports that as a finding, and the database does not
+open until the log is restored.
+
+Bytes after the last complete commit are a commit that did not finish, or
+damage in the last commit. They are a finding too. After a crash that is
+a false alarm; after damage it is the only warning.
 
 Measured on 26.09.2026 with 1000 rows in two commits: one flipped bit in
-the middle of the log hid both commits. Before this finding, the check
-said intact. Step 10a of the roadmap is to tell the two cases apart and
-not to cut a damaged log.
+the middle of the log hid both commits. The first version of the check
+said intact. With step 10a, the same flip in the first commit
+refuses the log and names the frame.
 
 ## One process, one writer
 
