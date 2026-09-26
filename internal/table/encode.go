@@ -133,43 +133,102 @@ func encodeKey(t *Table, row Row) []byte {
 func decodeKey(t *Table, b []byte, row Row) error {
 	d := decoder{b: b, what: "key of table " + t.Name}
 	for _, k := range t.Key {
-		switch t.Columns[k].Type {
-		case Int64:
-			row[k] = int64(d.uint64() ^ signBit)
-		case Float64:
-			bits := d.uint64()
-			if bits&signBit != 0 {
-				bits &^= signBit
-			} else {
-				bits = ^bits
-			}
-			f := math.Float64frombits(bits)
-			if d.err == nil && (math.IsNaN(f) || bits == signBit) {
-				d.fail("a float key that is not written: %x", bits)
-			}
-			row[k] = f
-		case Bool:
-			switch d.byte() {
-			case 0:
-				row[k] = false
-			case 1:
-				row[k] = true
-			default:
-				d.fail("bool is not 0 or 1")
-			}
-		case String:
-			s := d.escaped()
-			if d.err == nil && !utf8.Valid(s) {
-				d.fail("a string that is not UTF-8")
-			}
-			row[k] = string(s)
-		case Bytes:
-			row[k] = d.escaped()
-		case Time:
-			row[k] = d.time(d.int64FromKey(), uint64(d.uint32()))
-		}
+		row[k] = d.keyValue(t.Columns[k].Type)
 	}
 	return d.end()
+}
+
+// keyValue reads the key form of one value.
+func (d *decoder) keyValue(typ Type) any {
+	switch typ {
+	case Int64:
+		return int64(d.uint64() ^ signBit)
+	case Float64:
+		bits := d.uint64()
+		if bits&signBit != 0 {
+			bits &^= signBit
+		} else {
+			bits = ^bits
+		}
+		f := math.Float64frombits(bits)
+		if d.err == nil && (math.IsNaN(f) || bits == signBit) {
+			d.fail("a float key that is not written: %x", bits)
+		}
+		return f
+	case Bool:
+		switch d.byte() {
+		case 0:
+			return false
+		case 1:
+			return true
+		}
+		d.fail("bool is not 0 or 1")
+		return nil
+	case String:
+		s := d.escaped()
+		if d.err == nil && !utf8.Valid(s) {
+			d.fail("a string that is not UTF-8")
+		}
+		return string(s)
+	case Bytes:
+		return d.escaped()
+	default: // Time
+		return d.time(d.int64FromKey(), uint64(d.uint32()))
+	}
+}
+
+// appendIndexColumns appends the key forms of the index columns of a row.
+func appendIndexColumns(b []byte, t *Table, ix *Index, row Row) []byte {
+	return appendColumns(b, t, ix.Columns, row)
+}
+
+// appendColumns appends the key forms of the given columns of a row. A
+// column that allows null has a mark before its value: 0 for null, 1 for
+// a value. So null sorts before every value. Key columns never allow
+// null, so for them this is encodeKey.
+func appendColumns(b []byte, t *Table, cols []int, row Row) []byte {
+	for _, c := range cols {
+		col := t.Columns[c]
+		if col.Null {
+			if row[c] == nil {
+				b = append(b, 0)
+				continue
+			}
+			b = append(b, 1)
+		}
+		b = appendKey(b, col.Type, row[c])
+	}
+	return b
+}
+
+// indexKey returns the key of a row in an index: its index columns, then
+// its primary key. The primary key makes each entry distinct.
+func indexKey(t *Table, ix *Index, row Row) []byte {
+	return append(appendIndexColumns(nil, t, ix, row), encodeKey(t, row)...)
+}
+
+// decodeIndexKey reads the index columns of an index key into row and
+// returns the primary key that follows them.
+func decodeIndexKey(t *Table, ix *Index, b []byte, row Row) ([]byte, error) {
+	d := decoder{b: b, what: "key of index " + ix.Name + " of table " + t.Name}
+	for _, c := range ix.Columns {
+		col := t.Columns[c]
+		if col.Null {
+			switch d.byte() {
+			case 0:
+				row[c] = nil
+				continue
+			case 1:
+			default:
+				d.fail("null mark of column %s", col.Name)
+			}
+		}
+		row[c] = d.keyValue(col.Type)
+	}
+	if d.err != nil {
+		return nil, d.err
+	}
+	return b[d.off:], nil
 }
 
 // encodeValues returns the stored form of the columns that are not in

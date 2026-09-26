@@ -242,6 +242,54 @@ write. Numbers are in their shortest form. No bit is set past the last
 column, and no byte follows the end. A fuzz test checks for each decoder that an input it
 accepts encodes to the same bytes.
 
+## Indexes
+
+An index is a tree of its own. The key of an entry is the index columns of
+a row, then the row's primary key. The value is empty. The primary key
+makes each entry distinct, so one layout serves unique and other indexes.
+
+A column that allows null gets a mark before its value in an index: 0 for
+null, 1 for a value. So null sorts first. A float in an indexed column
+must not be NaN, as in a key.
+
+A unique index refuses a write when an entry with the same index values
+exists. The key forms of the index values are prefix-free, so this is one
+seek. A row with a null in the index conflicts with no row, as in SQL.
+
+A write checks everything before it changes a page: the row, the key
+lengths and each unique index. So a refused write changes nothing, and
+the caller can go on in the same transaction. An update changes only the
+entries whose index values change.
+
+CreateIndex fills the new index from the rows. If a row does not fit, it
+frees the pages of the new tree and leaves the schema as it was.
+
+A scan through an index reads the row by its primary key. It checks that
+the row exists and has the entry's index values. Otherwise it returns an
+error: an index that does not match its table must not give a wrong row.
+
+## Scans and cursors
+
+A scan takes values for the leading columns of the key or of an index.
+There are three kinds: a prefix, a lower bound where it starts, and an
+upper bound before which it stops. It runs in both directions. The bounds become byte keys.
+The end of a prefix is its successor: the prefix with trailing 0xFF bytes
+removed and the last byte incremented.
+
+A cursor is the byte key of the last row a page returned. The next page
+starts at the first key after it, whatever rows exist then. So a cursor
+stays valid when rows are added or deleted. A row that exists through the
+whole walk comes exactly once. A row added behind the cursor does not
+come.
+
+## Counters
+
+A counter is a number in the catalog tree, stored with the rows of the
+transaction that increments it. A committed value is never given again,
+also not after a crash. A value given in a transaction that rolls back is
+given again, because nothing outside the transaction has seen it commit.
+Counters do not change the schema version.
+
 ## One process, one writer
 
 The database runs in one process (S-1). Inside the process, one write
