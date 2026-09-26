@@ -426,7 +426,7 @@ func TestCannotCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := Run(fs, "db"); !errors.Is(err, ErrCannotCheck) {
+	if _, err := Run(fs, "db"); !errors.Is(err, ErrCannotCheck) || !errors.Is(err, vfs.ErrLocked) {
 		t.Fatalf("locked: %v", err)
 	}
 }
