@@ -306,3 +306,42 @@ func TestCrashAfterTwoSyncs(t *testing.T) {
 		}
 	}
 }
+
+// TestLockBehavesLikeOS: on both implementations, a lock excludes a
+// second one, also in the same process, and Unlock frees it.
+func TestLockBehavesLikeOS(t *testing.T) {
+	dir := t.TempDir()
+	for _, c := range []struct {
+		fs   FS
+		name string
+	}{{OS{}, filepath.Join(dir, "lock")}, {NewSim(), "lock"}} {
+		unlock, err := c.fs.Lock(c.name)
+		if err != nil {
+			t.Fatalf("%T: first lock: %v", c.fs, err)
+		}
+		if _, err := c.fs.Lock(c.name); !errors.Is(err, ErrLocked) {
+			t.Errorf("%T: second lock: %v, want ErrLocked", c.fs, err)
+		}
+		if err := unlock(); err != nil {
+			t.Errorf("%T: unlock: %v", c.fs, err)
+		}
+		unlock, err = c.fs.Lock(c.name)
+		if err != nil {
+			t.Errorf("%T: lock after unlock: %v", c.fs, err)
+		} else {
+			unlock()
+		}
+	}
+}
+
+// TestCrashReleasesLocks: after a power loss the process that held a lock
+// is gone, and a new one can take it.
+func TestCrashReleasesLocks(t *testing.T) {
+	s := NewSim()
+	if _, err := s.Lock("lock"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Crash(nil).Lock("lock"); err != nil {
+		t.Errorf("lock after crash: %v", err)
+	}
+}

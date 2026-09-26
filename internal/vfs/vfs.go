@@ -34,7 +34,15 @@ type FS interface {
 	// Rename returns: after it, newName is either the old file or the
 	// renamed one, never a mix.
 	Rename(oldName, newName string) error
+	// Lock takes an exclusive lock on the named file, and creates it if
+	// needed. It does not wait: if the lock is held, it returns ErrLocked.
+	// The lock is released by the Unlock it returns, or when the process
+	// ends.
+	Lock(name string) (Unlock func() error, err error)
 }
+
+// ErrLocked is returned by Lock while another holder has the lock.
+var ErrLocked = errors.New("vfs: file is locked by another holder")
 
 // ErrCrashed is returned by every call on a Sim after its call budget is
 // used up: the simulated process has stopped.

@@ -329,7 +329,7 @@ func run(fs vfs.FS, steps []step) (acked, running model) {
 }
 
 // TestCrashAtEveryCall is the crash test of P-1 for the store: commits
-// and checkpoints, stopped after every call, then a power loss in 12
+// and checkpoints, stopped after every call, then a power loss in 24
 // ways. The database opens with the acked state, or with the step in
 // flight applied, and takes a commit after it.
 func TestCrashAtEveryCall(t *testing.T) {
@@ -343,7 +343,9 @@ func TestCrashAtEveryCall(t *testing.T) {
 			fs := vfs.NewSim()
 			fs.SetBudget(k)
 			acked, running := run(fs, steps)
-			for power := int64(0); power < 12; power++ {
+			// 24 ways: with 12, one workload saw no step in flight
+			// survive, only because the lock file shifted every stop.
+			for power := int64(0); power < 24; power++ {
 				var r *rand.Rand
 				if power > 0 {
 					r = rand.New(rand.NewSource(seed*1_000_003 + int64(k)*1_009 + power))
@@ -482,5 +484,36 @@ func TestCreateAfterUnfinishedCreate(t *testing.T) {
 	}
 	if ok, _ := fs.Exists("db-new"); ok {
 		t.Error("db-new still exists")
+	}
+}
+
+// TestSecondOpenIsRefused: while a Store is open, a second Open of the
+// same database fails with vfs.ErrLocked. After Close, or after the
+// process is gone, it succeeds (S-1).
+func TestSecondOpenIsRefused(t *testing.T) {
+	fs := vfs.NewSim()
+	s := mustOpen(t, fs)
+	if _, err := Open(fs, "db", Options{PageSize: ps}); !errors.Is(err, vfs.ErrLocked) {
+		t.Errorf("second open: %v, want vfs.ErrLocked", err)
+	}
+	s.Close()
+	s = mustOpen(t, fs)
+	s2 := mustOpen(t, fs.Crash(nil))
+	s2.Close()
+}
+
+// TestFailedOpenReleasesTheLock: an Open that fails does not keep the
+// lock.
+func TestFailedOpenReleasesTheLock(t *testing.T) {
+	fs := vfs.NewSim()
+	fs.Open("db") // an empty file is not a database
+	if _, err := Open(fs, "db", Options{PageSize: ps}); err == nil {
+		t.Fatal("empty file accepted")
+	}
+	unlock, err := fs.Lock("db-lock")
+	if err != nil {
+		t.Errorf("lock after a failed open: %v", err)
+	} else {
+		unlock()
 	}
 }
