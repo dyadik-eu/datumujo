@@ -1,10 +1,17 @@
 // Command datumujo works on a database file.
 //
 //	datumujo check FILE
+//	datumujo backup FILE COPY
+//	datumujo restore COPY FILE
 //
 // check reads the whole file and prints each damaged page and each fault
 // in its structure, then statistics. It exits 0 when the file is intact, 1
 // on a finding, and 2 when it could not check.
+//
+// backup copies a database that no program has open. A program that has
+// it open makes the copy with backup.Backup. restore makes a database
+// from a copy. Neither replaces a file. Both exit 0 when the copy is made
+// and the check accepts it, and 1 otherwise.
 package main
 
 import (
@@ -12,6 +19,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/dyadik-eu/datumujo/internal/backup"
 	"github.com/dyadik-eu/datumujo/internal/check"
 	"github.com/dyadik-eu/datumujo/internal/vfs"
 )
@@ -20,15 +28,29 @@ func main() {
 	os.Exit(run(vfs.OS{}, os.Args[1:], os.Stdout, os.Stderr))
 }
 
-const usage = "usage: datumujo check FILE"
+const usage = "usage: datumujo check FILE | backup FILE COPY | restore COPY FILE"
 
 // run is the command without the process around it.
 func run(fs vfs.FS, args []string, stdout, stderr io.Writer) int {
-	if len(args) != 2 || args[0] != "check" {
-		fmt.Fprintln(stderr, usage)
-		return 2
+	switch {
+	case len(args) == 2 && args[0] == "check":
+		return runCheck(fs, args[1], stdout, stderr)
+	case len(args) == 3 && (args[0] == "backup" || args[0] == "restore"):
+		// A backup of a database that no program has open is a restore
+		// under another name: both read the source read-only.
+		if err := backup.Restore(fs, args[1], args[2]); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "%s written; the check accepts it\n", args[2])
+		return 0
 	}
-	r, err := check.Run(fs, args[1])
+	fmt.Fprintln(stderr, usage)
+	return 2
+}
+
+func runCheck(fs vfs.FS, name string, stdout, stderr io.Writer) int {
+	r, err := check.Run(fs, name)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2

@@ -18,7 +18,7 @@ func TestExitCodes(t *testing.T) {
 		code := run(fs, args, &out, &errOut)
 		return code, out.String(), errOut.String()
 	}
-	for _, args := range [][]string{nil, {"check"}, {"fix", "db"}, {"check", "a", "b"}} {
+	for _, args := range [][]string{nil, {"check"}, {"fix", "db"}, {"check", "a", "b"}, {"backup", "a"}, {"restore", "a", "b", "c"}} {
 		if code, _, stderr := exit(args...); code != 2 || !strings.Contains(stderr, "usage") {
 			t.Errorf("%q: exit %d, %q", args, code, stderr)
 		}
@@ -102,5 +102,49 @@ func TestExitCodes(t *testing.T) {
 	code, stdout, _ = exit("check", "db")
 	if code != 1 || !strings.Contains(stdout, "log is damaged") || !strings.Contains(stdout, "could not be opened") || strings.Contains(stdout, "pages:") {
 		t.Fatalf("damaged log: exit %d, %q", code, stdout)
+	}
+}
+
+// TestBackupAndRestore copies a database with backup, restores it with
+// restore, and checks that neither replaces a file.
+func TestBackupAndRestore(t *testing.T) {
+	fs := vfs.NewSim()
+	s, err := store.Open(fs, "db", store.Options{PageSize: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stx, _ := s.Begin()
+	tx, _ := table.Begin(stx, 1024)
+	if err := tx.CreateTable(table.Def{Name: "t", Columns: []table.Column{{Name: "k", Type: table.Int64}}, Key: []string{"k"}}); err != nil {
+		t.Fatal(err)
+	}
+	for k := int64(0); k < 5; k++ {
+		if err := tx.Insert("t", table.Row{k}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := stx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	exit := func(args ...string) (int, string) {
+		var out, errOut bytes.Buffer
+		code := run(fs, args, &out, &errOut)
+		return code, out.String() + errOut.String()
+	}
+	if code, out := exit("backup", "db", "copy"); code != 0 || !strings.Contains(out, "copy written") {
+		t.Fatalf("backup: exit %d, %q", code, out)
+	}
+	if code, out := exit("backup", "db", "copy"); code != 1 || !strings.Contains(out, "exists") {
+		t.Fatalf("backup over a copy: exit %d, %q", code, out)
+	}
+	if code, out := exit("restore", "copy", "db2"); code != 0 {
+		t.Fatalf("restore: exit %d, %q", code, out)
+	}
+	if code, out := exit("check", "db2"); code != 0 || !strings.Contains(out, "table t: 5 rows") {
+		t.Fatalf("check of the restored database: exit %d, %q", code, out)
+	}
+	if code, out := exit("restore", "nope", "db3"); code != 1 {
+		t.Fatalf("restore from no file: exit %d, %q", code, out)
 	}
 }
