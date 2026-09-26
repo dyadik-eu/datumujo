@@ -1065,3 +1065,74 @@ func TestReadOnly(t *testing.T) {
 		t.Fatal("read-only open created a log")
 	}
 }
+
+// TestSnapshotDuringCommit takes snapshots while commits run. Each commit
+// adds a page at the end and points page 1 at it. A snapshot must see the
+// header of the commit whose pages it reads, so the page that page 1
+// points at is inside its page count.
+func TestSnapshotDuringCommit(t *testing.T) {
+	s, err := Open(vfs.NewSim(), "db", Options{PageSize: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tx, _ := s.Begin()
+	first, _ := tx.Allocate()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error)
+	go func() {
+		for i := 0; i < 2000; i++ {
+			tx, err := s.Begin()
+			if err != nil {
+				done <- err
+				return
+			}
+			no, err := tx.Allocate()
+			if err == nil {
+				err = tx.Write(no, []byte("new"))
+			}
+			if err == nil {
+				err = tx.Write(first, binary.BigEndian.AppendUint64(nil, no))
+			}
+			if err == nil {
+				err = tx.Commit()
+			}
+			if err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	buf := make([]byte, 512)
+	seen := 0
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			if seen == 0 {
+				t.Fatal("no snapshot saw a pointer")
+			}
+			return
+		default:
+		}
+		snap, err := s.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := snap.Read(first, buf); err != nil {
+			t.Fatal(err)
+		}
+		if p := binary.BigEndian.Uint64(buf); p != 0 {
+			seen++
+			if p >= snap.Count() {
+				t.Fatalf("page %d points at page %d; the snapshot has %d pages", first, p, snap.Count())
+			}
+		}
+		snap.Close()
+	}
+}

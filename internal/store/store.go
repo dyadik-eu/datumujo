@@ -53,8 +53,13 @@ type Store struct {
 	recovered wal.Recovered // what Open found in the log
 	readOnly  bool
 
-	mu      sync.Mutex
-	hdr     page.Header // the header as of the last commit
+	mu  sync.Mutex
+	hdr page.Header // the header as of the last commit
+	// last is the number of that commit. It changes with hdr, under mu.
+	// The log counts a commit as soon as its frames are synced, before
+	// hdr changes; a snapshot that took the log's number with hdr would
+	// read the pages of one commit with the header of the one before.
+	last    int
 	readers map[int]int // open snapshots per commit number
 	closed  bool
 }
@@ -217,7 +222,7 @@ func open(fs vfs.FS, name string, db vfs.File, readOnly bool) (*Store, error) {
 		logf.Close()
 		return nil, fmt.Errorf("%w; the log holds no image of it", herr)
 	}
-	return &Store{db: db, logf: logf, log: l, pageSize: ps, hdr: h, readers: map[int]int{}, recovered: rec, readOnly: readOnly}, nil
+	return &Store{db: db, logf: logf, log: l, pageSize: ps, hdr: h, readers: map[int]int{}, recovered: rec, readOnly: readOnly, last: l.Last()}, nil
 }
 
 // emptyFile stands for a log that does not exist, in read-only mode.
@@ -293,13 +298,16 @@ func (s *Store) Snapshot() (*Snapshot, error) {
 	if s.closed {
 		return nil, ErrClosed
 	}
-	c := s.log.Last()
+	c := s.last
 	s.readers[c]++
 	return &Snapshot{s: s, commit: c, hdr: s.hdr}, nil
 }
 
 // Count returns the page count as of the snapshot.
 func (r *Snapshot) Count() uint64 { return r.hdr.PageCount }
+
+// Header returns the header as of the snapshot.
+func (r *Snapshot) Header() page.Header { return r.hdr }
 
 // FreeCount returns the number of free pages as of the snapshot.
 func (r *Snapshot) FreeCount() uint64 { return r.hdr.FreeCount }
@@ -536,7 +544,7 @@ func (t *Tx) Commit() error {
 		return err
 	}
 	t.s.mu.Lock()
-	t.s.hdr = t.hdr
+	t.s.hdr, t.s.last = t.hdr, t.s.log.Last()
 	t.s.mu.Unlock()
 	return nil
 }
