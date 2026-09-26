@@ -29,6 +29,17 @@ frames of its commit, chained to the checksum of the commit before. A frame
 after the last valid commit record is from a commit that did not finish, and
 is ignored (T-4).
 
+Recovery cannot tell a commit that did not finish from damage in the middle
+of the log: in both cases the chain breaks there. Open therefore reports how
+many bytes it left behind, and the check command (I-2) shows them. The next
+commit cuts these bytes off first. Otherwise a short new commit could leave
+old frames behind it. Each of them could continue the chain by a chance of
+2^-32.
+
+Each generation of the log has a random salt in its header, and the chain
+starts from it. Frames of an earlier generation that are still in the file
+do not chain.
+
 This meets:
 
 | ID | How |
