@@ -1,15 +1,18 @@
 package store
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/dyadik-eu/datumujo/internal/page"
 	"github.com/dyadik-eu/datumujo/internal/vfs"
+	"github.com/dyadik-eu/datumujo/internal/wal"
 )
 
 // ps is two sectors, so that a power loss can tear a page, the header page
@@ -242,51 +245,153 @@ func TestReadersAndWriterTogether(t *testing.T) {
 	}
 }
 
+// op is one change inside a transaction of a workload.
+type op struct {
+	kind string // "alloc", "write", "free", "root"
+	no   uint64 // page for write, free, root
+	text string // content for alloc and write
+	slot int    // root slot
+}
+
 // step is one step of a workload: a transaction or a checkpoint.
 type step struct {
 	checkpoint bool
-	allocate   int
-	pages      map[uint64]string
+	ops        []op
 }
 
+// model is what the database should hold: page count, the free list with
+// its head last, the roots, and the content of every page in use.
 type model struct {
 	count uint64
+	free  []uint64
+	roots [page.Roots]uint64
 	pages map[uint64]string
 }
 
-func (m model) apply(st step) model {
-	out := model{count: m.count + uint64(st.allocate), pages: map[uint64]string{}}
-	for no := uint64(1); no < out.count; no++ {
-		out.pages[no] = m.pages[no]
-	}
-	for no, c := range st.pages {
-		out.pages[no] = c
+func newModel() model { return model{count: 1, pages: map[uint64]string{}} }
+
+func (m model) clone() model {
+	out := m
+	out.free = append([]uint64(nil), m.free...)
+	out.pages = map[uint64]string{}
+	for k, v := range m.pages {
+		out.pages[k] = v
 	}
 	return out
 }
 
-func (m model) equal(n uint64, got map[uint64]string) bool {
-	return m.count == n && fmt.Sprint(m.pages) == fmt.Sprint(got)
+// alloc returns the page Allocate hands out: the head of the free list,
+// else a new one.
+func (m *model) alloc() uint64 {
+	if n := len(m.free); n > 0 {
+		no := m.free[n-1]
+		m.free = m.free[:n-1]
+		return no
+	}
+	m.count++
+	return m.count - 1
+}
+
+func (m model) apply(st step) model {
+	out := m.clone()
+	for _, o := range st.ops {
+		switch o.kind {
+		case "alloc":
+			out.pages[out.alloc()] = o.text
+		case "write":
+			out.pages[o.no] = o.text
+		case "free":
+			delete(out.pages, o.no)
+			out.free = append(out.free, o.no)
+		case "root":
+			out.roots[o.slot] = o.no
+		}
+	}
+	return out
+}
+
+// state is what a snapshot of the database shows.
+type state struct {
+	count, freeCount uint64
+	roots            [page.Roots]uint64
+	pages            map[uint64]string
+}
+
+func readState(t *testing.T, s *Store) state {
+	t.Helper()
+	r, err := s.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	st := state{count: r.Count(), freeCount: r.FreeCount(), pages: map[uint64]string{}}
+	for i := range st.roots {
+		st.roots[i] = r.Root(i)
+	}
+	buf := make([]byte, ps)
+	for no := uint64(1); no < r.Count(); no++ {
+		if err := r.Read(no, buf); err != nil {
+			t.Fatalf("page %d: %v", no, err)
+		}
+		st.pages[no] = content(buf)
+	}
+	return st
+}
+
+// matches reports whether the database state is the model: header fields
+// equal, pages in use hold their content, free pages carry the mark.
+func (m model) matches(st state) bool {
+	if st.count != m.count || st.freeCount != uint64(len(m.free)) || st.roots != m.roots {
+		return false
+	}
+	for no := uint64(1); no < m.count; no++ {
+		if c, used := m.pages[no]; used {
+			if st.pages[no] != c {
+				return false
+			}
+		} else if !strings.HasPrefix(st.pages[no], string(freeMark[:])) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m model) String() string {
+	return fmt.Sprintf("count %d, free %v, roots %v, pages %v", m.count, m.free, m.roots, m.pages)
 }
 
 func workload(seed int64) []step {
 	r := rand.New(rand.NewSource(seed))
+	m := newModel()
 	var out []step
-	count := uint64(1)
-	for i := 0; i < 14; i++ {
+	for i := 0; i < 16; i++ {
 		if i > 0 && r.Intn(4) == 0 {
 			out = append(out, step{checkpoint: true})
 			continue
 		}
-		st := step{allocate: r.Intn(3), pages: map[uint64]string{}}
-		if count == 1 && st.allocate == 0 {
-			st.allocate = 1
+		var st step
+		cur := m.clone()
+		for k := 0; k < 1+r.Intn(4); k++ {
+			used := make([]uint64, 0, len(cur.pages))
+			for no := range cur.pages {
+				used = append(used, no)
+			}
+			sort.Slice(used, func(a, b int) bool { return used[a] < used[b] })
+			var o op
+			switch n := r.Intn(10); {
+			case len(used) == 0 || n < 4:
+				o = op{kind: "alloc", text: fmt.Sprintf("s%d-a%d", i, k)}
+			case n < 7:
+				o = op{kind: "write", no: used[r.Intn(len(used))], text: fmt.Sprintf("s%d-w%d", i, k)}
+			case n < 9:
+				o = op{kind: "free", no: used[r.Intn(len(used))]}
+			default:
+				o = op{kind: "root", slot: r.Intn(page.Roots), no: used[r.Intn(len(used))]}
+			}
+			st.ops = append(st.ops, o)
+			cur = cur.apply(step{ops: []op{o}})
 		}
-		count += uint64(st.allocate)
-		for k := 0; k < 1+r.Intn(3); k++ {
-			no := uint64(1 + r.Intn(int(count-1)))
-			st.pages[no] = fmt.Sprintf("s%d-p%d", i, no)
-		}
+		m = cur
 		out = append(out, st)
 	}
 	return out
@@ -295,14 +400,13 @@ func workload(seed int64) []step {
 // run applies the workload to a store on fs until a call fails. It
 // returns the model of what was acked and of the step in flight.
 func run(fs vfs.FS, steps []step) (acked, running model) {
-	acked = model{count: 1, pages: map[uint64]string{}}
+	acked = newModel()
 	running = acked
 	s, err := Open(fs, "db", Options{PageSize: ps})
 	if err != nil {
 		return
 	}
 	for _, st := range steps {
-		running = acked.apply(st)
 		if st.checkpoint {
 			running = acked
 			if _, err := s.Checkpoint(); err != nil {
@@ -310,15 +414,29 @@ func run(fs vfs.FS, steps []step) (acked, running model) {
 			}
 			continue
 		}
+		running = acked.apply(st)
 		tx, err := s.Begin()
 		if err != nil {
 			return
 		}
-		for i := 0; i < st.allocate; i++ {
-			tx.Allocate()
-		}
-		for no, c := range st.pages {
-			tx.Write(no, []byte(c))
+		for _, o := range st.ops {
+			switch o.kind {
+			case "alloc":
+				no, err := tx.Allocate()
+				if err == nil {
+					err = tx.Write(no, []byte(o.text))
+				}
+				if err != nil {
+					tx.Rollback()
+					return
+				}
+			case "write":
+				tx.Write(o.no, []byte(o.text))
+			case "free":
+				tx.Free(o.no)
+			case "root":
+				tx.SetRoot(o.slot, o.no)
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			return
@@ -329,14 +447,25 @@ func run(fs vfs.FS, steps []step) (acked, running model) {
 }
 
 // TestCrashAtEveryCall is the crash test of P-1 for the store: commits
-// and checkpoints, stopped after every call, then a power loss in 24
-// ways. The database opens with the acked state, or with the step in
-// flight applied, and takes a commit after it.
+// with allocations, frees and roots, and checkpoints, stopped after every
+// call, then a power loss in 24 ways. The database opens with the acked
+// state, or with the step in flight applied, and takes a commit after it.
 func TestCrashAtEveryCall(t *testing.T) {
+	kinds := map[string]int{}
 	for seed := int64(1); seed <= 4; seed++ {
 		steps := workload(seed)
+		for _, st := range steps {
+			if st.checkpoint {
+				kinds["checkpoint"]++
+			}
+			for _, o := range st.ops {
+				kinds[o.kind]++
+			}
+		}
 		full := vfs.NewSim()
-		run(full, steps)
+		if acked, _ := run(full, steps); len(acked.pages) == 0 {
+			t.Fatalf("seed %d: the workload ends with no page in use", seed)
+		}
 		calls := full.Calls()
 		toAcked, toRunning, header := 0, 0, 0
 		for k := 0; k <= calls; k++ {
@@ -363,18 +492,22 @@ func TestCrashAtEveryCall(t *testing.T) {
 				if err != nil {
 					t.Fatalf("seed %d, k %d, power %d: open: %v", seed, k, power, err)
 				}
-				n, got := readAll(t, s)
+				got := readState(t, s)
 				switch {
-				case acked.equal(n, got):
+				case acked.matches(got):
 					toAcked++
-				case running.equal(n, got):
+				case running.matches(got):
 					toRunning++
 				default:
-					t.Fatalf("seed %d, k %d, power %d: %d pages %v; acked %d %v, running %d %v", seed, k, power, n, got, acked.count, acked.pages, running.count, running.pages)
+					t.Fatalf("seed %d, k %d, power %d: %+v\nacked:   %v\nrunning: %v", seed, k, power, got, acked, running)
 				}
+				// The store takes a commit after recovery: an allocation
+				// takes a free page if there is one, else a new one.
 				write(t, s, map[uint64]string{}, 1)
-				if n2, _ := readAll(t, s); n2 != n+1 {
-					t.Fatalf("seed %d, k %d, power %d: commit after recovery: %d pages, want %d", seed, k, power, n2, n+1)
+				next := readState(t, s)
+				if got.freeCount > 0 && (next.freeCount != got.freeCount-1 || next.count != got.count) ||
+					got.freeCount == 0 && (next.freeCount != 0 || next.count != got.count+1) {
+					t.Fatalf("seed %d, k %d, power %d: allocation after recovery: %d pages, %d free, before %d, %d", seed, k, power, next.count, next.freeCount, got.count, got.freeCount)
 				}
 				s.Close()
 			}
@@ -384,6 +517,13 @@ func TestCrashAtEveryCall(t *testing.T) {
 		// the recovery of the header from the log was tested.
 		if toAcked == 0 || toRunning == 0 || header == 0 {
 			t.Errorf("seed %d: acked %d, in flight %d, torn headers %d; each must occur", seed, toAcked, toRunning, header)
+		}
+	}
+	// Control: the workloads use every kind of step.
+	t.Logf("steps: %v", kinds)
+	for _, k := range []string{"alloc", "write", "free", "root", "checkpoint"} {
+		if kinds[k] == 0 {
+			t.Errorf("no %s in the workloads", k)
 		}
 	}
 }
@@ -515,5 +655,227 @@ func TestFailedOpenReleasesTheLock(t *testing.T) {
 		t.Errorf("lock after a failed open: %v", err)
 	} else {
 		unlock()
+	}
+}
+
+func begin(t *testing.T, s *Store) *Tx {
+	t.Helper()
+	tx, err := s.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tx
+}
+
+func alloc(t *testing.T, tx *Tx) uint64 {
+	t.Helper()
+	no, err := tx.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return no
+}
+
+// TestFreeThenAllocate: a freed page is handed out again, the one freed
+// last first, before the file grows. The free list survives a reopen and
+// a checkpoint.
+func TestFreeThenAllocate(t *testing.T) {
+	fs := vfs.NewSim()
+	s := mustOpen(t, fs)
+	tx := begin(t, s)
+	for i := 0; i < 3; i++ {
+		alloc(t, tx) // pages 1, 2, 3
+	}
+	tx.Commit()
+	tx = begin(t, s)
+	tx.Free(2)
+	tx.Free(3)
+	if tx.FreeCount() != 2 {
+		t.Errorf("free count %d, want 2", tx.FreeCount())
+	}
+	tx.Commit()
+	s.Close()
+	s = mustOpen(t, fs.Crash(nil))
+	s.Checkpoint()
+	s.Close()
+	s = mustOpen(t, fs.Crash(nil))
+	tx = begin(t, s)
+	if got := []uint64{alloc(t, tx), alloc(t, tx), alloc(t, tx)}; fmt.Sprint(got) != "[3 2 4]" {
+		t.Errorf("allocated %v, want [3 2 4]", got)
+	}
+	if tx.Count() != 5 || tx.FreeCount() != 0 {
+		t.Errorf("count %d, free %d", tx.Count(), tx.FreeCount())
+	}
+	tx.Rollback()
+}
+
+// TestSnapshotReadsAFreedPage: a snapshot from before a page was freed and
+// reused still reads the page as it was.
+func TestSnapshotReadsAFreedPage(t *testing.T) {
+	s := mustOpen(t, vfs.NewSim())
+	write(t, s, map[uint64]string{1: "kept"}, 1)
+	old, _ := s.Snapshot()
+	defer old.Close()
+	tx := begin(t, s)
+	tx.Free(1)
+	no := alloc(t, tx)
+	tx.Write(no, []byte("reused"))
+	tx.Commit()
+	if no != 1 {
+		t.Fatalf("reused page %d, want 1", no)
+	}
+	buf := make([]byte, ps)
+	old.Read(1, buf)
+	if content(buf) != "kept" {
+		t.Errorf("old snapshot: %q", content(buf))
+	}
+}
+
+func TestFreeRefuses(t *testing.T) {
+	s := mustOpen(t, vfs.NewSim())
+	write(t, s, map[uint64]string{}, 2)
+	tx := begin(t, s)
+	defer tx.Rollback()
+	for _, no := range []uint64{0, 3, 99} {
+		if err := tx.Free(no); err == nil {
+			t.Errorf("free %d accepted", no)
+		}
+	}
+	tx.Free(1)
+	if err := tx.Free(1); err == nil {
+		t.Error("double free accepted")
+	}
+	if err := tx.Write(1, []byte("x")); err == nil {
+		t.Error("write to a freed page accepted")
+	}
+}
+
+// TestDamagedFreeListIsReported: a page on the free list is handed out
+// only if it carries the free mark and points to a free page that can be
+// one. Handing out a page that is not free would give away data.
+func TestDamagedFreeListIsReported(t *testing.T) {
+	for name, c := range map[string]struct {
+		free []uint64 // freed in this order; the last is the head
+		edit func(p []byte)
+	}{
+		// With one free page, zeros point to page 0, which is right for
+		// the last free page; only the mark tells.
+		"no mark": {[]uint64{2}, func(p []byte) {}},
+		"points past the end": {[]uint64{3, 2}, func(p []byte) {
+			copy(p, freeMark[:])
+			binary.BigEndian.PutUint64(p[8:], 99)
+		}},
+		"points to page 0, but more are free": {[]uint64{3, 2}, func(p []byte) {
+			copy(p, freeMark[:])
+		}},
+	} {
+		fs := vfs.NewSim()
+		s := mustOpen(t, fs)
+		write(t, s, map[uint64]string{}, 3)
+		tx := begin(t, s)
+		for _, no := range c.free {
+			tx.Free(no)
+		}
+		tx.Commit()
+		s.Checkpoint()
+		s.Close()
+		db, _ := fs.Open("db")
+		p := make([]byte, ps)
+		c.edit(p)
+		page.Write(db, 2, p)
+		db.Sync()
+		s = mustOpen(t, fs.Crash(nil))
+		tx = begin(t, s)
+		var d *page.DamagedError
+		if _, err := tx.Allocate(); !errors.As(err, &d) || d.Page != 2 {
+			t.Errorf("%s: allocate: %v", name, err)
+		}
+		tx.Rollback()
+		s.Close()
+	}
+}
+
+// TestHeaderPageIsNotRead: page 0 is the header. Neither a snapshot nor a
+// Tx reads it as a page; its fields are read through Count, FreeCount and
+// Root, which in a Tx show its own changes.
+func TestHeaderPageIsNotRead(t *testing.T) {
+	s := mustOpen(t, vfs.NewSim())
+	write(t, s, map[uint64]string{}, 2)
+	buf := make([]byte, ps)
+	r, _ := s.Snapshot()
+	if err := r.Read(0, buf); err == nil {
+		t.Error("snapshot read page 0")
+	}
+	r.Close()
+	tx := begin(t, s)
+	defer tx.Rollback()
+	tx.SetRoot(1, 2)
+	if err := tx.Read(0, buf); err == nil {
+		t.Error("Tx read page 0")
+	}
+	if tx.Root(1) != 2 {
+		t.Errorf("Tx root %d, want its own change 2", tx.Root(1))
+	}
+}
+
+// TestLogAndHeaderMustAgree: the page count in the last commit frame and
+// in the header image of that commit are written together. If they
+// differ, the log is damaged, and Open says so.
+func TestLogAndHeaderMustAgree(t *testing.T) {
+	fs := vfs.NewSim()
+	s := mustOpen(t, fs)
+	s.Close()
+	lf, _ := fs.Open("db-log")
+	l, _, err := wal.Open(lf, ps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr := page.EncodeHeader(page.Header{Version: page.Version, PageSize: ps, PageCount: 1})
+	if err := l.Commit([]wal.Page{{No: 0, Data: hdr}}, 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(fs.Crash(nil), "db", Options{PageSize: ps}); !errors.Is(err, page.ErrDamaged) {
+		t.Errorf("open with count 7 in the log and 1 in the header: %v", err)
+	}
+}
+
+// TestRoots: a root set in a commit survives a reopen; a snapshot keeps
+// the root of its commit; a rollback keeps the old one.
+func TestRoots(t *testing.T) {
+	fs := vfs.NewSim()
+	s := mustOpen(t, fs)
+	write(t, s, map[uint64]string{}, 4)
+	tx := begin(t, s)
+	if err := tx.SetRoot(0, 3); err != nil {
+		t.Fatal(err)
+	}
+	tx.Commit()
+	old, _ := s.Snapshot()
+	tx = begin(t, s)
+	tx.SetRoot(0, 4)
+	tx.SetRoot(2, 1)
+	tx.Commit()
+	if old.Root(0) != 3 {
+		t.Errorf("old snapshot root %d, want 3", old.Root(0))
+	}
+	old.Close()
+	tx = begin(t, s)
+	tx.SetRoot(0, 2)
+	tx.Rollback()
+	for _, bad := range []struct {
+		slot int
+		no   uint64
+	}{{-1, 1}, {page.Roots, 1}, {0, 5}} {
+		tx = begin(t, s)
+		if err := tx.SetRoot(bad.slot, bad.no); err == nil {
+			t.Errorf("SetRoot(%d, %d) accepted", bad.slot, bad.no)
+		}
+		tx.Rollback()
+	}
+	s.Close()
+	s = mustOpen(t, fs.Crash(nil))
+	st := readState(t, s)
+	if st.roots != [page.Roots]uint64{4, 0, 1, 0} {
+		t.Errorf("roots after reopen: %v", st.roots)
 	}
 }

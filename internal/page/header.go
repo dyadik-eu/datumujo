@@ -22,13 +22,23 @@ var Magic = [8]byte{'d', 'a', 't', 'u', 'm', 'u', 'j', 'o'}
 //	offset  8  uint32  format version
 //	offset 12  uint32  page size
 //	offset 16  uint64  page count, the header included
-const headerFields = 24
+//	offset 24  uint64  first free page, 0 if none
+//	offset 32  uint64  number of free pages
+//	offset 40  uint64  root 0 to root 3, one after the other: page
+//	                   numbers the layers above keep here, 0 if unused
+const headerFields = 72
+
+// Roots is the number of root slots in the header.
+const Roots = 4
 
 // Header is the content of page 0.
 type Header struct {
 	Version   uint32
 	PageSize  int
 	PageCount uint64
+	FreeHead  uint64
+	FreeCount uint64
+	Root      [Roots]uint64
 }
 
 // ErrNotDatabase is returned for a file that does not start with Magic.
@@ -48,6 +58,11 @@ func EncodeHeader(h Header) []byte {
 	binary.BigEndian.PutUint32(p[8:], h.Version)
 	binary.BigEndian.PutUint32(p[12:], uint32(h.PageSize))
 	binary.BigEndian.PutUint64(p[16:], h.PageCount)
+	binary.BigEndian.PutUint64(p[24:], h.FreeHead)
+	binary.BigEndian.PutUint64(p[32:], h.FreeCount)
+	for i, r := range h.Root {
+		binary.BigEndian.PutUint64(p[40+8*i:], r)
+	}
 	Seal(p, 0)
 	return p
 }
@@ -64,6 +79,11 @@ func DecodeHeader(p []byte) (Header, error) {
 		Version:   binary.BigEndian.Uint32(p[8:]),
 		PageSize:  int(binary.BigEndian.Uint32(p[12:])),
 		PageCount: binary.BigEndian.Uint64(p[16:]),
+		FreeHead:  binary.BigEndian.Uint64(p[24:]),
+		FreeCount: binary.BigEndian.Uint64(p[32:]),
+	}
+	for i := range h.Root {
+		h.Root[i] = binary.BigEndian.Uint64(p[40+8*i:])
 	}
 	if h.Version != Version {
 		return Header{}, &VersionError{h.Version}
@@ -79,6 +99,16 @@ func DecodeHeader(p []byte) (Header, error) {
 	}
 	if h.PageCount == 0 {
 		return Header{}, &DamagedError{0, "page count 0, but the header itself is a page"}
+	}
+	// Every page number in the header points into the file, and the
+	// free pages are fewer than the pages. Page 0 is never free.
+	if h.FreeHead >= h.PageCount || h.FreeCount >= h.PageCount || (h.FreeHead == 0) != (h.FreeCount == 0) {
+		return Header{}, &DamagedError{0, fmt.Sprintf("free list head %d, count %d, in %d pages", h.FreeHead, h.FreeCount, h.PageCount)}
+	}
+	for i, r := range h.Root {
+		if r >= h.PageCount {
+			return Header{}, &DamagedError{0, fmt.Sprintf("root %d is page %d, past the end of %d pages", i, r, h.PageCount)}
+		}
 	}
 	return h, nil
 }
