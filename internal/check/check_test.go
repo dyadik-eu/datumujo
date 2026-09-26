@@ -558,3 +558,33 @@ func TestEveryFlipInTheLogIsReported(t *testing.T) {
 	}
 	t.Logf("28 header bytes and %d frames, %d in the first commit, each flipped once: none intact", frames, firstFrames)
 }
+
+// TestCheckWritesNothing checks a database whose log is gone, as after a
+// checkpoint and a copy of the file alone. The check must not create a
+// log, and must leave the file as it was.
+func TestCheckWritesNothing(t *testing.T) {
+	fs := vfs.NewSim()
+	build(t, fs, "db")
+	if err := fs.Remove("db-log"); err != nil {
+		t.Fatal(err)
+	}
+	f, _ := fs.Open("db")
+	size, _ := f.Size()
+	before := make([]byte, size)
+	f.ReadAt(before, 0)
+	f.Close()
+	r := run(t, fs, "db")
+	if len(r.Findings) != 0 {
+		t.Fatalf("findings %v", r.Findings)
+	}
+	if ok, _ := fs.Exists("db-log"); ok {
+		t.Fatal("the check created a log")
+	}
+	f, _ = fs.Open("db")
+	after := make([]byte, size+1)
+	n, _ := f.ReadAt(after, 0)
+	f.Close()
+	if n != int(size) || string(after[:n]) != string(before) {
+		t.Fatal("the check changed the file")
+	}
+}

@@ -103,7 +103,12 @@ type Log struct {
 	// a new commit shorter than them would leave frames behind it that
 	// could, by a chance of 2^-32 each, continue the chain.
 	tail bool
+	// readOnly is set by OpenReadOnly: nothing is written.
+	readOnly bool
 }
+
+// ErrReadOnly is returned by Commit and Reset on a log opened read-only.
+var ErrReadOnly = errors.New("wal: the log is open read-only")
 
 // ErrNotLog is returned for a file that does not start with Magic.
 var ErrNotLog = errors.New("wal: not a log file")
@@ -120,7 +125,26 @@ func (e *DamagedError) Error() string { return "wal: the log is damaged: " + e.R
 // more than a partial header, becomes a new log: a new log is synced with
 // its header before the first commit, so such a file never held one.
 func Open(f vfs.File, pageSize int) (*Log, Recovered, error) {
-	l := &Log{f: f, pageSize: pageSize, versions: map[uint64][]version{}}
+	return openLog(f, pageSize, false)
+}
+
+// OpenReadOnly opens the log as Open does and writes nothing. Where Open
+// starts a new log, it returns an empty one. Commit and Reset on it fail.
+func OpenReadOnly(f vfs.File, pageSize int) (*Log, Recovered, error) {
+	return openLog(f, pageSize, true)
+}
+
+func openLog(f vfs.File, pageSize int, readOnly bool) (*Log, Recovered, error) {
+	l := &Log{f: f, pageSize: pageSize, versions: map[uint64][]version{}, readOnly: readOnly}
+	// newLog starts a new log, or in read-only mode stands for an empty
+	// one.
+	newLog := func() (*Log, Recovered, error) {
+		if readOnly {
+			l.end = headerSize
+			return l, Recovered{}, nil
+		}
+		return l, Recovered{}, l.reset()
+	}
 	size, err := f.Size()
 	if err != nil {
 		return nil, Recovered{}, err
@@ -131,13 +155,13 @@ func Open(f vfs.File, pageSize int) (*Log, Recovered, error) {
 		return nil, Recovered{}, err
 	}
 	if n < headerSize {
-		return l, Recovered{}, l.reset()
+		return newLog()
 	}
 	if err := l.parseHeader(hdr); err != nil {
 		if size > headerSize {
 			return nil, Recovered{}, err
 		}
-		return l, Recovered{}, l.reset()
+		return newLog()
 	}
 	rec := l.recover(size)
 	if off, n, err := l.laterCommit(size); err != nil {
@@ -288,6 +312,9 @@ type version struct {
 func (l *Log) Reset() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.readOnly {
+		return ErrReadOnly
+	}
 	return l.reset()
 }
 
@@ -298,6 +325,9 @@ func (l *Log) Reset() error {
 func (l *Log) Commit(pages []Page, count uint64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.readOnly {
+		return ErrReadOnly
+	}
 	if len(pages) == 0 {
 		return errors.New("wal: a commit needs at least one page")
 	}

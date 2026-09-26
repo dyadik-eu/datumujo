@@ -67,9 +67,8 @@ type Report struct {
 // say anything about the file.
 var ErrCannotCheck = errors.New("check: could not check")
 
-// Run checks the database in the file name of fs. It reads and writes
-// nothing but what opening the database does, and it does not create a
-// missing file. An error from Run matches ErrCannotCheck; a damaged file
+// Run checks the database in the file name of fs. It opens it read-only
+// and writes nothing but the lock file. An error from Run matches ErrCannotCheck; a damaged file
 // gives a Report with findings instead.
 func Run(fs vfs.FS, name string) (*Report, error) {
 	cannot := func(err error) error { return fmt.Errorf("%w: %s: %v", ErrCannotCheck, name, err) }
@@ -91,7 +90,7 @@ func Run(fs vfs.FS, name string) (*Report, error) {
 			return nil, cannot(err)
 		}
 	}
-	s, err := store.Open(fs, name, store.Options{})
+	s, err := store.Open(fs, name, store.Options{ReadOnly: true})
 	if err != nil {
 		var pd *page.DamagedError
 		var wd *wal.DamagedError
