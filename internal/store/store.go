@@ -322,6 +322,10 @@ func (s *Store) Snapshot() (*Snapshot, error) {
 // Count returns the page count as of the snapshot.
 func (r *Snapshot) Count() uint64 { return r.hdr.PageCount }
 
+// LogBytes returns the size of the committed part of the log. A
+// checkpoint brings it back to the size of the log header.
+func (s *Store) LogBytes() int64 { return s.log.Bytes() }
+
 // Header returns the header as of the snapshot.
 func (r *Snapshot) Header() page.Header { return r.hdr }
 

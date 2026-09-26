@@ -423,6 +423,14 @@ func (l *Log) Commits() int {
 	return l.commits
 }
 
+// Bytes returns the size of the committed part of the log: the header
+// and the frames of the commits in this generation.
+func (l *Log) Bytes() int64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.end
+}
+
 // Last returns the number of the last commit, 0 if there was none since
 // Open.
 func (l *Log) Last() int {
