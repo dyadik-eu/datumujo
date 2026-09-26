@@ -89,8 +89,27 @@ A page that was written to the wrong place, or read from the wrong place,
 fails the check just like a damaged page. A failed check is an error that
 names the page (I-1). The read returns no data.
 
-Page 0 is the header: a magic value, the format version, the page size and
-the page count. A file with an unknown format version is rejected (I-4).
+Page 0 is the header. It holds a magic value, the format version, the page
+size and the page count. It also holds the head and length of the free list,
+and four root slots. A
+file with an unknown format version is rejected (I-4). Every page number in
+the header must point into the file.
+
+Page 0 belongs to the store. Readers and the writer do not read it as a
+page; they read its fields. Inside a write transaction the fields show the
+changes of that transaction.
+
+## Free pages
+
+A freed page goes on a list whose head is in the header. Each free page
+holds a mark and the number of the next one. Allocate takes the page freed
+last, before the file grows. It checks the mark and the next number first.
+A page on the list without the mark means that the list is damaged. Handing
+it out would give away data.
+
+A freed page can be reused in the next commit at once. A snapshot of an
+earlier commit still reads its old content from the log or from the file.
+No checkpoint changes the file while that snapshot is open.
 
 The page size is a field of the header. The value for new files is decided
 after a measurement with the load of P-5 (Q-2). Until then the tests run with

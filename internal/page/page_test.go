@@ -105,7 +105,7 @@ func TestReadPassesOnFileErrors(t *testing.T) {
 
 func TestHeaderRoundTrip(t *testing.T) {
 	for _, size := range []int{MinSize, 4096, MaxSize} {
-		h := Header{Version: Version, PageSize: size, PageCount: 12345}
+		h := Header{Version: Version, PageSize: size, PageCount: 12345, FreeHead: 77, FreeCount: 3, Root: [Roots]uint64{5, 0, 900, 12344}}
 		s := vfs.NewSim()
 		f, _ := s.Open("db")
 		f.WriteAt(EncodeHeader(h), 0)
@@ -155,6 +155,28 @@ func TestHeaderRejects(t *testing.T) {
 		{"damaged count", edit(func(p []byte) { p[20] ^= 1 }), func(err error) bool { return damagedPage(err, 0) }},
 		{"page count 0", edit(func(p []byte) { binary.BigEndian.PutUint64(p[16:], 0); Seal(p, 0) }), func(err error) bool { return damagedPage(err, 0) }},
 		{"cut after the fields", good[:100], func(err error) bool { return damagedPage(err, 0) }},
+		{"free head past the end", edit(func(p []byte) {
+			binary.BigEndian.PutUint64(p[24:], 1)
+			binary.BigEndian.PutUint64(p[32:], 1)
+			Seal(p, 0)
+		}), func(err error) bool { return damagedPage(err, 0) }},
+		{"free head without count", edit(func(p []byte) {
+			binary.BigEndian.PutUint64(p[16:], 5)
+			binary.BigEndian.PutUint64(p[24:], 2)
+			Seal(p, 0)
+		}), func(err error) bool { return damagedPage(err, 0) }},
+		{"free count without head", edit(func(p []byte) {
+			binary.BigEndian.PutUint64(p[16:], 5)
+			binary.BigEndian.PutUint64(p[32:], 2)
+			Seal(p, 0)
+		}), func(err error) bool { return damagedPage(err, 0) }},
+		{"free count as large as the file", edit(func(p []byte) {
+			binary.BigEndian.PutUint64(p[16:], 5)
+			binary.BigEndian.PutUint64(p[24:], 2)
+			binary.BigEndian.PutUint64(p[32:], 5)
+			Seal(p, 0)
+		}), func(err error) bool { return damagedPage(err, 0) }},
+		{"root past the end", edit(func(p []byte) { binary.BigEndian.PutUint64(p[40+8*3:], 1); Seal(p, 0) }), func(err error) bool { return damagedPage(err, 0) }},
 	} {
 		if err := headerFile(c.p); !c.ok(err) {
 			t.Errorf("%s: %v", c.name, err)
