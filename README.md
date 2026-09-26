@@ -18,7 +18,9 @@ stage.
 
 The first user is [abelejo](https://github.com/dyadik-eu/abelejo), a code
 forge. Its needs define the first stage. The requirements are in
-[docs/requirements.md](docs/requirements.md).
+[docs/requirements.md](docs/requirements.md), the design in
+[docs/design.md](docs/design.md), and the steps in
+[docs/roadmap.md](docs/roadmap.md).
 
 ## Licence
 
