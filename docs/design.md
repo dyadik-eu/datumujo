@@ -187,6 +187,20 @@ Why 4096 and not 2048, which reads about 30 % faster here:
 The measurement is repeated with the load test of step 12. If the engine
 gets a page cache, it is repeated then as well.
 
+Repeated on 26.09.2026 with typed tables and indexes: the load test of
+"Load test" below, three rounds, each size once per round. The median
+of three runs:
+
+| page size | file | largest transaction | load | get every issue | comments by prefix | check | backup |
+|---|---|---|---|---|---|---|---|
+| 2048 | 19.0 MB | 1.53 MB | 6.18 s | 16.3 ms | 36.9 ms | 97 ms | 207 ms |
+| 4096 | 20.7 MB | 1.64 MB | 6.48 s | 25.8 ms | 55.9 ms | 121 ms | 232 ms |
+| 8192 | 23.2 MB | 1.84 MB | 6.61 s | 26.3 ms | 71.5 ms | 126 ms | 217 ms |
+
+The picture is the one above. 2048 reads about a third faster here and
+makes a smaller file. The reasons for 4096 hold: the key limit, and a
+read path without a cache. New files keep 4096 bytes.
+
 ## The tree
 
 Tables and indexes are B+trees of byte keys and byte values, ordered by
@@ -381,6 +395,65 @@ changes both at once when a commit is done. The log counts a commit when
 its frames are synced, before that. A snapshot that took the number from
 the log read pages of one commit with the header of the one before. The
 first backup test found this.
+
+## Memory of a transaction
+
+A transaction holds the pages it changes until it commits. MaxTxBytes
+bounds them (D-3), 16 MiB by default at any page size. The page that
+would pass the bound fails with ErrTxTooLarge, and the caller rolls the
+transaction back. A page already changed costs nothing more. A commit
+builds all frames in one buffer, so it adds one more copy of the pages
+and the frame headers. The peak of a transaction is about twice its
+bound.
+
+Measured on the file system of the operating system, with a bound of
+4 MiB and pages of 4096 bytes. A full transaction held 4.24 MB on the
+heap, and its commit allocated 4.60 MB. Before the commit built the
+frames in place, it allocated 9.59 MB: each frame once alone, and once
+in the buffer.
+
+Outside a transaction, the log keeps a small entry for each page image
+until the next checkpoint. The engine does not checkpoint by itself. A
+program calls Checkpoint, as the load test does every 100 commits.
+
+## Load test
+
+The load test of P-5 (`internal/load`, `TestLoad`) loads the issues,
+pull requests, comments and review comments of in-toto/in-toto-golang
+and in-toto/in-toto. It uses three tables and three indexes on the
+issues: by state, by author, and by time of change. Each issue goes in
+with its comments in one commit, as a forge writes them, and a checkpoint
+follows every 100 commits.
+
+Environment: Go 1.26.5, darwin/arm64, Apple M1 Pro, macOS 27.0, APFS,
+pages of 4096 bytes, data fetched on 26.09.2026. Other programs ran on
+the machine, with a load average between 23 and 65. The times are the
+median of five runs, with the lowest and highest in brackets.
+
+| measure | value |
+|---|---|
+| rows | 1425 issues and pull requests, 3223 comments, 3270 review comments |
+| load | 1427 commits in 6.72 s (6.46 to 8.70), about 4.7 ms per commit |
+| largest transaction | 401 pages, 1.64 MB, of 16 MiB allowed |
+| memory | 590 KB allocated per commit; at most 12.3 KB more held after the load |
+| file | 20.7 MB, 5059 pages |
+| get every issue by key | 25.5 ms (21.8 to 32.3) for 1425 |
+| open issues, 30 per page with the cursor | 1.25 ms (1.23 to 2.41) for 5 pages |
+| comments of each issue by prefix | 55.9 ms (49.8 to 72.8) for 1425 issues |
+| 30 issues changed last, per repository | 1.15 ms (0.86 to 1.82) for 2 |
+| check | 153 ms (105 to 316), intact |
+| backup while the database is open | 319 ms (207 to 405), accepted by the check |
+
+The counts, the largest transaction and the file size were the same in
+all five runs. The test compares each count with the JSON data: rows per
+table, open issues through the paged index, and comments through the
+prefix scans. It also compares the rows the check counts with the scans.
+16 comments belong to in-toto #380, which the API no longer returns.
+They are in the table, and no prefix scan of an issue finds them.
+
+A commit costs about 4.7 ms; where the time goes was not measured here.
+The reads a forge makes per request stay below a millisecond. For this load,
+the engine needs no page cache.
 
 ## One process, one writer
 

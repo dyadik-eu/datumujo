@@ -347,11 +347,14 @@ func (l *Log) Commit(pages []Page, count uint64) error {
 		}
 		seen[p.No] = true
 	}
-	buf := make([]byte, 0, len(pages)*(frameHeaderSize+l.pageSize))
+	// One buffer for all frames, each built in place: the commit adds one
+	// copy of its pages to the memory of the transaction, not two.
+	size := frameHeaderSize + l.pageSize
+	buf := make([]byte, len(pages)*size)
 	chain := l.chain
 	offsets := make(map[uint64]int64, len(pages))
 	for i, p := range pages {
-		frame := make([]byte, frameHeaderSize+l.pageSize)
+		frame := buf[i*size : (i+1)*size]
 		binary.BigEndian.PutUint64(frame[0:], p.No)
 		if i == len(pages)-1 {
 			binary.BigEndian.PutUint64(frame[8:], count)
@@ -360,8 +363,7 @@ func (l *Log) Commit(pages []Page, count uint64) error {
 		copy(frame[frameHeaderSize:], p.Data)
 		chain = frameSum(l.salt, chain, frame)
 		binary.BigEndian.PutUint32(frame[24:], chain)
-		offsets[p.No] = l.end + int64(len(buf))
-		buf = append(buf, frame...)
+		offsets[p.No] = l.end + int64(i*size)
 	}
 	if l.tail {
 		if err := l.f.Truncate(l.end); err != nil {

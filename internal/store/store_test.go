@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -1135,4 +1137,163 @@ func TestSnapshotDuringCommit(t *testing.T) {
 		}
 		snap.Close()
 	}
+}
+
+// TestTxMemoryBound checks the bound of D-3. A transaction holds at most
+// MaxTxBytes of changed pages. The page that would pass the bound fails
+// with ErrTxTooLarge, whether it is written, allocated or freed. A page
+// already changed can be written again. After a rollback, the next
+// transaction starts from nothing.
+func TestTxMemoryBound(t *testing.T) {
+	const ps, pages = 512, 10
+	s, err := Open(vfs.NewSim(), "db", Options{PageSize: ps, MaxTxBytes: ps * pages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tx, _ := s.Begin()
+	var nos []uint64
+	for i := 0; i < pages; i++ {
+		no, err := tx.Allocate()
+		if err != nil {
+			t.Fatalf("page %d of %d: %v", i+1, pages, err)
+		}
+		nos = append(nos, no)
+	}
+	if err := tx.SetRoot(0, nos[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Allocate(); !errors.Is(err, ErrTxTooLarge) {
+		t.Fatalf("page %d: %v", pages+1, err)
+	}
+	if tx.Changed() != pages {
+		t.Fatalf("Changed is %d, want %d: the header does not count", tx.Changed(), pages)
+	}
+	if err := tx.Write(nos[3], []byte("again")); err != nil {
+		t.Fatalf("a page already changed: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	tx, _ = s.Begin()
+	for _, no := range nos[:pages-1] {
+		if err := tx.Write(no, []byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Free(nos[pages-1]); err != nil {
+		t.Fatalf("the last page within the bound: %v", err)
+	}
+	tx.Rollback()
+	tx, _ = s.Begin()
+	for _, no := range nos {
+		if err := tx.Write(no, []byte("y")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	no, _ := tx.Allocate()
+	if no != 0 {
+		t.Fatalf("an allocation past the bound returned page %d", no)
+	}
+	tx.Rollback()
+	// Ten more pages, and one of them on the free list.
+	tx, _ = s.Begin()
+	var more []uint64
+	for i := 0; i < pages; i++ {
+		no, err := tx.Allocate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		more = append(more, no)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	tx, _ = s.Begin()
+	if err := tx.Free(more[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	tx, _ = s.Begin()
+	defer tx.Rollback()
+	for _, no := range nos {
+		if err := tx.Write(no, []byte("w")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Taking the free page back adds it to the changed pages.
+	if tx.FreeCount() != 1 {
+		t.Fatalf("%d free pages", tx.FreeCount())
+	}
+	if _, err := tx.Allocate(); !errors.Is(err, ErrTxTooLarge) {
+		t.Fatalf("allocation from the free list past the bound: %v", err)
+	}
+	if tx.FreeCount() != 1 {
+		t.Fatal("the refused allocation took the free page")
+	}
+	// A write and a free of a page not yet changed hit the bound too.
+	if err := tx.Write(more[1], []byte("v")); !errors.Is(err, ErrTxTooLarge) {
+		t.Fatalf("write past the bound: %v", err)
+	}
+	if err := tx.Free(more[2]); !errors.Is(err, ErrTxTooLarge) {
+		t.Fatalf("free past the bound: %v", err)
+	}
+	if tx.FreeCount() != 1 || tx.Changed() != pages {
+		t.Fatalf("refused calls changed the transaction: %d free, %d changed", tx.FreeCount(), tx.Changed())
+	}
+}
+
+// TestTxMemoryMeasured measures the heap of a transaction that fills its
+// bound. It holds about the bound, and a commit adds one buffer of the
+// same size for the frames of the log.
+func TestTxMemoryMeasured(t *testing.T) {
+	const ps, bound = 4096, 4 << 20
+	// On the operating system: the simulated disk keeps copies of every
+	// write, and they would count here.
+	s, err := Open(vfs.OS{}, filepath.Join(t.TempDir(), "db"), Options{PageSize: ps, MaxTxBytes: bound})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	heap := func() uint64 {
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return m.HeapAlloc
+	}
+	before := heap()
+	tx, _ := s.Begin()
+	n := 0
+	for {
+		if _, err := tx.Allocate(); errors.Is(err, ErrTxTooLarge) {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		n++
+	}
+	held := heap() - before
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	runtime.ReadMemStats(&m1)
+	commit := m1.TotalAlloc - m0.TotalAlloc
+	if n != bound/ps {
+		t.Fatalf("%d pages fit, want %d", n, bound/ps)
+	}
+	// The commit builds the frames in one buffer: one more copy of the
+	// pages, and the frame headers.
+	if commit > bound*5/4 {
+		t.Fatalf("the commit allocated %d bytes for %d bytes of pages", commit, bound)
+	}
+	// Maps and slices add a little; more than a quarter would mean a copy
+	// per page that the bound does not count.
+	if held < bound || held > bound*5/4 {
+		t.Fatalf("a full transaction holds %d bytes; the bound is %d", held, bound)
+	}
+	t.Logf("%d pages of %d bytes: %d bytes on the heap for a bound of %d, and the commit allocated %d", n, ps, held, bound, commit)
 }
