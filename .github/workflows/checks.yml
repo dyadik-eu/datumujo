@@ -44,8 +44,10 @@ jobs:
       - name: vet
         run: go vet ./...
 
+      # With the race detector: snapshots, the writer and checkpoints run
+      # in goroutines at once (TestReadersAndWriterTogether).
       - name: test
-        run: go test ./...
+        run: go test -race ./...
 
       # Every fuzz target runs for a short time (requirement P-2). A run
       # that finds no target at all fails: a step that checks nothing must

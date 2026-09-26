@@ -50,6 +50,15 @@ func (OS) Remove(name string) error {
 	return syncDir(filepath.Dir(name))
 }
 
+// Rename renames the file and calls fsync on the directory, so that the
+// new name survives a power loss.
+func (OS) Rename(oldName, newName string) error {
+	if err := os.Rename(oldName, newName); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(newName))
+}
+
 // Exists reports whether the file exists. An error other than "does not
 // exist" is returned, not reported as false.
 func (OS) Exists(name string) (bool, error) {

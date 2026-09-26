@@ -29,6 +29,11 @@ type FS interface {
 	Remove(name string) error
 	// Exists reports whether the named file exists.
 	Exists(name string) (bool, error)
+	// Rename gives the file oldName the name newName, and replaces a file
+	// of that name. The step is atomic and survives a power loss once
+	// Rename returns: after it, newName is either the old file or the
+	// renamed one, never a mix.
+	Rename(oldName, newName string) error
 }
 
 // ErrCrashed is returned by every call on a Sim after its call budget is

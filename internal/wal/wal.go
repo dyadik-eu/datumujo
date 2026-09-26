@@ -12,6 +12,10 @@
 //
 // A new generation of the log gets a new salt, so frames of an earlier
 // generation that are still in the file do not chain.
+//
+// Commits are numbered from 1, and the numbers go on across generations
+// while the Log is open: a reader that holds a commit number from before
+// a Reset never sees a commit of the next generation as its own.
 package wal
 
 import (
@@ -21,6 +25,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"sort"
+	"sync"
 
 	"github.com/dyadik-eu/datumujo/internal/page"
 	"github.com/dyadik-eu/datumujo/internal/vfs"
@@ -64,17 +70,20 @@ type Recovered struct {
 	Ignored int64
 }
 
-// Log is an open log.
+// Log is an open log. Read may run in several goroutines at once, and
+// alongside one Commit; Reset waits for all of them.
 type Log struct {
+	mu       sync.RWMutex
 	f        vfs.File
 	pageSize int
 	salt     uint64
 	chain    uint32
-	end      int64 // offset after the last committed frame
-	commits  int
+	end      int64  // offset after the last committed frame
+	commits  int    // commits in this generation
+	base     int    // commits of the generations before, while open
 	count    uint64 // page count after the last commit
-	// latest holds the offset of the newest committed image of a page.
-	latest map[uint64]int64
+	// versions holds, per page, its committed images in commit order.
+	versions map[uint64][]version
 	// tail is set while bytes after end may still be in the file, left by
 	// a commit that did not finish. The next commit cuts them off first:
 	// a new commit shorter than them would leave frames behind it that
@@ -96,7 +105,7 @@ func (e *DamagedError) Error() string { return "wal: the log is damaged: " + e.R
 // more than a partial header, becomes a new log: a new log is synced with
 // its header before the first commit, so such a file never held one.
 func Open(f vfs.File, pageSize int) (*Log, Recovered, error) {
-	l := &Log{f: f, pageSize: pageSize, latest: map[uint64]int64{}}
+	l := &Log{f: f, pageSize: pageSize, versions: map[uint64][]version{}}
 	size, err := f.Size()
 	if err != nil {
 		return nil, Recovered{}, err
@@ -155,7 +164,7 @@ func (l *Log) recover(size int64) Recovered {
 		pending[binary.BigEndian.Uint64(frame[0:])] = off
 		if count := binary.BigEndian.Uint64(frame[8:]); count != 0 {
 			for no, o := range pending {
-				l.latest[no] = o
+				l.versions[no] = append(l.versions[no], version{l.base + l.commits + 1, o})
 			}
 			pending = map[uint64]int64{}
 			l.chain, l.end, l.count = chain, off+int64(len(frame)), count
@@ -199,9 +208,25 @@ func (l *Log) reset() error {
 	}
 	l.salt = binary.BigEndian.Uint64(salt[:])
 	l.chain = uint32(l.salt) ^ uint32(l.salt>>32)
+	l.base += l.commits
 	l.end, l.commits, l.count = headerSize, 0, 0
-	l.latest = map[uint64]int64{}
+	l.versions = map[uint64][]version{}
 	return nil
+}
+
+// version is one committed image of a page.
+type version struct {
+	commit int
+	off    int64
+}
+
+// Reset starts a new generation of the log: empty, with a new salt,
+// synced. It waits for running reads. The caller must have copied every
+// page it needs out of the log before; the commit numbers go on.
+func (l *Log) Reset() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.reset()
 }
 
 // Commit appends the pages as one commit, with count as the page count of
@@ -209,6 +234,8 @@ func (l *Log) reset() error {
 // commit is durable (T-3). Each page must be sealed; a page number must
 // not repeat within one commit.
 func (l *Log) Commit(pages []Page, count uint64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if len(pages) == 0 {
 		return errors.New("wal: a commit needs at least one page")
 	}
@@ -258,20 +285,28 @@ func (l *Log) Commit(pages []Page, count uint64) error {
 	}
 	l.tail = false
 	for no, off := range offsets {
-		l.latest[no] = off
+		l.versions[no] = append(l.versions[no], version{l.base + l.commits + 1, off})
 	}
 	l.chain, l.end, l.count = chain, l.end+int64(len(buf)), count
 	l.commits++
 	return nil
 }
 
-// Read reads the newest committed image of page no into p. It reports
-// false if the log holds no image of it. The image is checked as a page.
-func (l *Log) Read(no uint64, p []byte) (bool, error) {
-	off, ok := l.latest[no]
-	if !ok {
+// Read reads into p the newest image of page no from a commit numbered
+// upTo or lower. It reports false if the log holds none. The image is
+// checked as a page.
+func (l *Log) Read(no uint64, upTo int, p []byte) (bool, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	vs := l.versions[no]
+	i := len(vs) - 1
+	for i >= 0 && vs[i].commit > upTo {
+		i--
+	}
+	if i < 0 {
 		return false, nil
 	}
+	off := vs[i].off
 	if _, err := l.f.ReadAt(p, off+frameHeaderSize); err != nil {
 		return true, fmt.Errorf("wal: page %d: %w", no, err)
 	}
@@ -279,8 +314,70 @@ func (l *Log) Read(no uint64, p []byte) (bool, error) {
 }
 
 // Count returns the page count of the database after the last commit, and
-// false if the log holds no commit.
-func (l *Log) Count() (uint64, bool) { return l.count, l.commits > 0 }
+// false if this generation of the log holds no commit.
+func (l *Log) Count() (uint64, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.count, l.commits > 0
+}
 
-// Commits returns the number of commits in the log.
-func (l *Log) Commits() int { return l.commits }
+// Commits returns the number of commits in this generation of the log.
+func (l *Log) Commits() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.commits
+}
+
+// Last returns the number of the last commit, 0 if there was none since
+// Open.
+func (l *Log) Last() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.base + l.commits
+}
+
+// Newest calls fn with the newest image of every page in this generation,
+// in page order. fn must not keep img.
+func (l *Log) Newest(fn func(no uint64, img []byte) error) error {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	nos := make([]uint64, 0, len(l.versions))
+	for no := range l.versions {
+		nos = append(nos, no)
+	}
+	sort.Slice(nos, func(i, j int) bool { return nos[i] < nos[j] })
+	img := make([]byte, l.pageSize)
+	for _, no := range nos {
+		vs := l.versions[no]
+		if _, err := l.f.ReadAt(img, vs[len(vs)-1].off+frameHeaderSize); err != nil {
+			return fmt.Errorf("wal: page %d: %w", no, err)
+		}
+		if err := page.Check(img, no); err != nil {
+			return err
+		}
+		if err := fn(no, img); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PageSize reads the page size from the header of the log in f. It is
+// how a database whose header page is damaged learns its page size, to
+// recover that page from the log.
+func PageSize(f vfs.File) (int, error) {
+	hdr := make([]byte, headerSize)
+	if n, err := f.ReadAt(hdr, 0); n < headerSize {
+		if err == nil || errors.Is(err, io.EOF) {
+			return 0, ErrNotLog
+		}
+		return 0, err
+	}
+	if string(hdr[:8]) != string(Magic[:]) {
+		return 0, ErrNotLog
+	}
+	if crc32.Checksum(hdr[:24], castagnoli) != binary.BigEndian.Uint32(hdr[24:]) {
+		return 0, &DamagedError{"header checksum does not match"}
+	}
+	return int(binary.BigEndian.Uint32(hdr[12:])), nil
+}

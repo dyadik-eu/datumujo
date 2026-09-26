@@ -64,6 +64,24 @@ SQLite by default saves the old page versions in a journal and then writes
 the database file in place. While it writes, no reader can read. This
 breaks T-2.
 
+Every commit also writes page 0, the header with the new page count. So a
+header page that a checkpoint left torn in the file is replaced by its
+newest image in the log, like any other page. Open reads the page size from
+the log header for this case.
+
+Commits have numbers that go on across generations of the log while the
+database is open. A snapshot holds a commit number, and after a new
+generation starts, it never takes a commit of that generation for its own.
+
+## A new file is created in one step
+
+For a new database, Open writes the header to a file with the suffix
+"-new". It calls fsync on that file and then renames it. So a database file that
+exists had its header on the disk once. Written in place, a power loss
+during creation left a torn header and no log. That file could not be
+opened, and it looked like a database cut short by damage. Creating it again
+without a word would hide such damage.
+
 ## Pages carry their own checksum
 
 Every page ends with a trailer: a CRC-32C over the page and its page number.
@@ -80,10 +98,12 @@ more than one size.
 
 ## One process, one writer
 
-The database runs in one process (S-1). Open takes an exclusive lock on the
-database file, so a second process cannot open it at the same time. Inside
-the process, one write transaction at a time holds the writer lock. Readers
-take no lock.
+The database runs in one process (S-1). Inside the process, one write
+transaction at a time holds the writer lock, and a checkpoint takes it too.
+Readers take no lock.
+
+Not built yet: an exclusive lock on the file at Open, so that a second
+process cannot open the database at the same time. It comes before step 6.
 
 ## All file access goes through one interface
 
