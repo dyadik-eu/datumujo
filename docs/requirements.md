@@ -1,7 +1,8 @@
 # Requirements, stage 1
 
-Written on 2026-09-24. Source: the plan of abelejo (`plan.md` in that
-repository), decisions E-7 and E-7c, and the features in its section 3.
+Written on 2026-09-24 for the first user, a code forge. Since v0.1.0 on
+2026-09-27, datumujo is a project of its own. The column "Example use"
+shows what a forge needs; the requirements do not depend on it.
 
 Stage 1 is a storage engine with a typed Go API. It has no query language.
 Stage 2 adds a subset of SQL.
@@ -20,7 +21,7 @@ is not closed by a statement in this file.
 
 ## Data model
 
-| ID | Requirement | Need in abelejo |
+| ID | Requirement | Example use |
 |---|---|---|
 | M-1 | Tables with a primary key and typed columns: int64, float64, bool, string, bytes, time. Each column can allow null. | accounts, repositories, issues, pull requests, comments |
 | M-2 | Secondary indexes, also over more than one column. | issues of a repository by state and number |
@@ -53,7 +54,7 @@ This is rule 10 of the house rules: a silent failure invents a value.
 
 ## Operation
 
-| ID | Requirement | Need in abelejo |
+| ID | Requirement | Example use |
 |---|---|---|
 | O-1 | A consistent backup while the database is open for writes. | backup of the register and the forge (bauplan B-36) |
 | O-2 | A restore makes a database that the check command (I-2) accepts. | same |
@@ -66,7 +67,7 @@ This is rule 10 of the house rules: a silent failure invents a value.
 | P-1 | Crash test: a simulated power loss after each write system call of a workload. After each one, T-4 and I-2 hold. |
 | P-2 | Fuzz tests for every function that reads the file format. |
 | P-3 | Damage test: flip bits in a file. The database reports each flipped page (I-1) and returns no wrong row. |
-| P-4 | Stage 2 uses SQLite as the test oracle for SQL results, in tests only. abelejo uses git the same way. |
+| P-4 | Stage 2 uses SQLite as the test oracle for SQL results, in tests only. |
 | P-5 | Measured load: the metadata of real projects. The first target is the two in-toto repositories from bauplan B-50: 83 and 177 issues, 390 and 776 pull requests, and 1064 and 2159 issue comments. |
 
 ## Design constraints
