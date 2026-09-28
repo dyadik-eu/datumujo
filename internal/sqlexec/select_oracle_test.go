@@ -148,6 +148,85 @@ func (g queries) query(tb tableInfo) (src string, names []string, ordered bool) 
 	return b.String(), names, ordered
 }
 
+// aggQuery writes one SELECT with GROUP BY or aggregates.
+func (g queries) aggQuery(tb tableInfo) (src string, names []string, ordered bool) {
+	w := g.w
+	pick := func(types string) string {
+		for {
+			if e := g.expr(tb, types[w.r.Intn(len(types))]); e != "" {
+				return e
+			}
+		}
+	}
+	var keys []string
+	for n := w.r.Intn(3); len(keys) < n; {
+		keys = append(keys, pick("iftbx"))
+	}
+	var items []string
+	for _, k := range keys {
+		if w.r.Intn(4) > 0 {
+			items = append(items, k)
+		}
+	}
+	for n := 1 + w.r.Intn(3); n > 0; n-- {
+		d := ""
+		if w.r.Intn(4) == 0 {
+			d = "DISTINCT "
+		}
+		switch w.r.Intn(6) {
+		case 0:
+			items = append(items, "count(*)")
+		case 1:
+			items = append(items, "count("+d+pick("iftbx")+")")
+		case 2:
+			items = append(items, "sum("+d+pick("if")+")")
+		case 3:
+			items = append(items, "avg("+d+pick("if")+")")
+		case 4:
+			items = append(items, w.one("min(", "max(")+pick("iftbx")+")")
+		default:
+			items = append(items, "count(*) * 2 + "+w.intLit())
+		}
+	}
+	var b strings.Builder
+	b.WriteString("SELECT ")
+	for i, it := range items {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		names = append(names, "c"+strconv.Itoa(i+1))
+		b.WriteString(it + " AS " + names[i])
+	}
+	b.WriteString(" FROM " + tb.name)
+	if w.r.Intn(3) == 0 {
+		b.WriteString(" WHERE " + w.cond(tb.name))
+	}
+	if len(keys) > 0 {
+		b.WriteString(" GROUP BY " + strings.Join(keys, ", "))
+	}
+	if w.r.Intn(3) == 0 {
+		b.WriteString(" HAVING " + w.one("count(*) > "+strconv.Itoa(w.r.Intn(4)), "sum("+pick("i")+") > "+w.intLit(), "min("+pick("t")+") IS NOT NULL"))
+	}
+	if w.r.Intn(2) == 0 {
+		// Rows that are the same in all columns compare as equal, so the
+		// order over all columns is total for the comparison.
+		var ns []string
+		for i := range names {
+			n := strconv.Itoa(i + 1)
+			if w.r.Intn(2) == 0 {
+				n += " DESC"
+			}
+			ns = append(ns, n)
+		}
+		b.WriteString(" ORDER BY " + strings.Join(ns, ", "))
+		ordered = true
+		if w.r.Intn(3) == 0 {
+			fmt.Fprintf(&b, " LIMIT %d", w.r.Intn(4))
+		}
+	}
+	return b.String(), names, ordered
+}
+
 // TestSelectAgainstSQLite fills the tables with a random workload in
 // SQLite and here, then runs random queries in both. The rows must be
 // the same, in the same order where the query orders them totally, and
@@ -184,7 +263,15 @@ func selectAgainstSQLite(t *testing.T, seed int64) {
 	}
 	var qs []q
 	for len(qs) < 600 {
-		src, names, ordered := g.query(queryTables[w.r.Intn(len(queryTables))])
+		tb := queryTables[w.r.Intn(len(queryTables))]
+		var src string
+		var names []string
+		var ordered bool
+		if w.r.Intn(3) == 0 {
+			src, names, ordered = g.aggQuery(tb)
+		} else {
+			src, names, ordered = g.query(tb)
+		}
 		qs = append(qs, q{src, names, ordered})
 	}
 
@@ -252,6 +339,9 @@ func selectAgainstSQLite(t *testing.T, seed int64) {
 		ours, plan := run(x.src, Limits{})
 		plain, _ := run(x.src, Limits{NoIndex: true})
 		plans[strings.Fields(plan)[0]]++
+		if strings.Contains(plan, "GROUP") {
+			plans["GROUP"]++
+		}
 		their := append([]string(nil), theirs[i]...)
 		if !x.ordered {
 			sort.Strings(ours)
@@ -269,8 +359,10 @@ func selectAgainstSQLite(t *testing.T, seed int64) {
 		rowsSeen += len(ours)
 	}
 	t.Logf("%d queries, %d in total order, %d rows compared; plans %v", len(qs), ordered, rowsSeen, plans)
-	if plans["SEARCH"] < len(qs)/10 {
-		t.Errorf("only %d of %d queries used a search; the test does not reach the plan", plans["SEARCH"], len(qs))
+	// A third of the queries group rows and have WHERE less often, so
+	// one in twenty is the floor.
+	if plans["SEARCH"] < len(qs)/20 || plans["GROUP"] < len(qs)/5 {
+		t.Errorf("of %d queries, %d used a search and %d grouped rows; the test does not reach the plan or the groups", len(qs), plans["SEARCH"], plans["GROUP"])
 	}
 	if rowsSeen < 2000 {
 		t.Errorf("only %d rows compared", rowsSeen)

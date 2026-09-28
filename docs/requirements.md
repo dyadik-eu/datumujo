@@ -149,3 +149,6 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | the rows an UPDATE visits first | in rowid order | in key order; a statement that fails for one order can succeed for the other |
 | the name of a result column without an alias | the text as written: `1+1` | the expression as printed: `(1 + 1)` |
 | NaN in ORDER BY | NaN is stored as NULL | NaN sorts after NULL and before every other value |
+| a column neither in GROUP BY nor in an aggregate | the value of some row of the group | error |
+| `sum` or `avg` of TEXT or BOOLEAN | the values as numbers: 'a' is 0, TRUE is 1 | error: they need INTEGER or REAL |
+| `sum` of REAL past float64 | Inf | error: REAL overflow |

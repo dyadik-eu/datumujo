@@ -551,7 +551,47 @@ sort reads all rows first.
 
 The oracle tests run each random query and each random write twice here:
 with the plan and without. The results must be the same. The query
-test fails if fewer than one in ten of its queries use a SEARCH.
+test has two floors. At least one in twenty of its queries uses a
+SEARCH, and at least one in five groups rows.
+
+## Groups and aggregates
+
+A query with GROUP BY, HAVING or an aggregate runs in two steps. The
+first reads the rows that pass WHERE and puts each into its group. The
+second computes one row per group: the values of GROUP BY, then the
+result of each aggregate. The select list, HAVING and ORDER BY read
+that group row.
+
+Before they compile, the query replaces each aggregate in them, and
+each expression that is in GROUP BY, with a column of the group row.
+Two expressions are the same when they print the same. A column of the
+table that is left over is an error. SQLite would take its value from
+some row of the group, a value that no rule picks (rule 10). PostgreSQL
+refuses such a query too.
+
+The aggregates are count, sum, avg, min and max, each also with
+DISTINCT. They follow SQLite, measured on 28.09.2026:
+
+| Aggregate | Rule |
+|---|---|
+| `count(*)`, `count(x)` | all rows; the rows where x is not NULL |
+| `sum` | INTEGER while all values are INTEGER and the sum fits; an overflow is an error, as in SQLite. With a REAL value, a REAL sum by the compensated summation of Kahan, Babuska and Neumaier, as in SQLite. |
+| `avg` | always REAL |
+| `min`, `max` | NULL is left out; of equal values the first stays |
+| over no row | count is 0, the others NULL |
+
+Without GROUP BY there is one group, also when no row passes WHERE.
+With GROUP BY and no row there is no group. NULL is one group, and 3
+and 3.0 are one group, as for DISTINCT. The groups come in the order of
+their first row; only ORDER BY fixes an order.
+
+The groups and the values that DISTINCT inside an aggregate has seen
+count against the bound of memory (L-10).
+
+The oracle test makes a third of its random queries group rows. They
+have keys over any type, every aggregate with and without DISTINCT,
+HAVING, WHERE and LIMIT. It compares a REAL sum by its bits, so it checks the
+summation of SQLite too.
 
 ## Counters
 

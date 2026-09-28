@@ -38,6 +38,8 @@ type Query struct {
 	offset   *Expr
 	access   *access // nil: read every row
 	lim      Limits
+	group    *groupPlan // set for GROUP BY, HAVING or an aggregate
+	having   *Expr
 }
 
 // outCol computes one column of the result from a row of the table:
@@ -79,13 +81,8 @@ func notYet(at sqlparse.At, what string, step int) error {
 
 // Prepare compiles a SELECT against a schema and chooses its plan.
 func Prepare(sc *table.Schema, st *sqlparse.Select, lim Limits) (*Query, error) {
-	switch {
-	case len(st.Joins) > 0:
+	if len(st.Joins) > 0 {
 		return nil, notYet(st.Joins[0].At, "JOIN", 22)
-	case len(st.GroupBy) > 0:
-		return nil, notYet(st.GroupBy[0].Pos(), "GROUP BY", 21)
-	case st.Having != nil:
-		return nil, notYet(st.Having.Pos(), "HAVING", 21)
 	}
 	q := &Query{st: st, distinct: st.Distinct, lim: lim}
 	var s scope
@@ -99,7 +96,22 @@ func Prepare(sc *table.Schema, st *sqlparse.Select, lim Limits) (*Query, error) 
 			s.name = st.From.Alias
 		}
 	}
+	grouped := len(st.GroupBy) > 0 || st.Having != nil
 	for _, it := range st.Items {
+		grouped = grouped || !it.Star && hasAggregate(it.Expr)
+	}
+	for _, o := range st.OrderBy {
+		grouped = grouped || hasAggregate(o.Expr)
+	}
+	if grouped {
+		if err := q.prepareGroups(st, s); err != nil {
+			return nil, err
+		}
+	}
+	for _, it := range st.Items {
+		if grouped {
+			break
+		}
 		if it.Star {
 			if q.t == nil {
 				return nil, errAt(it.At, "* needs a table in FROM")
@@ -140,6 +152,9 @@ func Prepare(sc *table.Schema, st *sqlparse.Select, lim Limits) (*Query, error) 
 		}
 	}
 	for _, o := range st.OrderBy {
+		if grouped {
+			break
+		}
 		k, err := q.orderKey(o, s)
 		if err != nil {
 			return nil, err
@@ -332,6 +347,9 @@ func (q *Query) source(src Source, params []any, scanned *int64) (func() (*srcRo
 		if read, err = readRows(src, q.t, q.access, params, q.st.At, scanned); err != nil {
 			return nil, err
 		}
+	}
+	if q.group != nil {
+		return q.groupSource(read, params)
 	}
 	return func() (*srcRow, error) {
 		for {
@@ -532,5 +550,44 @@ func readRows(src Source, t *table.Table, a *access, params []any, at sqlparse.A
 			}
 			rows = nil
 		}
+	}, nil
+}
+
+// groupSource computes the groups, then gives one row for each group
+// that HAVING keeps.
+func (q *Query) groupSource(read func() ([]any, bool, error), params []any) (func() (*srcRow, error), error) {
+	rows, err := q.groups(read, params)
+	if err != nil {
+		return nil, err
+	}
+	return func() (*srcRow, error) {
+		for len(rows) > 0 {
+			grow := rows[0]
+			rows = rows[1:]
+			keep, err := keeps(q.having, q.st.Having, grow, params)
+			if err != nil {
+				return nil, err
+			}
+			if !keep {
+				continue
+			}
+			r := &srcRow{out: make([]any, len(q.cols))}
+			for i, c := range q.cols {
+				if r.out[i], err = c.expr.Eval(grow, params); err != nil {
+					return nil, err
+				}
+			}
+			for _, k := range q.order {
+				var v any
+				if k.expr == nil {
+					v = r.out[k.out]
+				} else if v, err = k.expr.Eval(grow, params); err != nil {
+					return nil, err
+				}
+				r.keys = append(r.keys, v)
+			}
+			return r, nil
+		}
+		return nil, nil
 	}, nil
 }

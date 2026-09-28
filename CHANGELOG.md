@@ -26,6 +26,8 @@ Stage 2, a core subset of SQL, is in progress. See
   it. It uses the order of a scan for ORDER BY. `Options.QueryMemory`
   bounds the rows a statement holds in memory (ErrQueryMemory).
 - `ScanOptions.FromExclusive` and `ScanOptions.ToInclusive` for scans.
+- GROUP BY, HAVING and the aggregates count, sum, avg, min and max, also
+  with DISTINCT.
 
 ### File format
 
