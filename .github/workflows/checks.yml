@@ -54,20 +54,24 @@ jobs:
       - name: test
         run: go test -race ./...
 
-      # Every fuzz target runs for a short time (requirement P-2). A run
-      # that finds no target at all fails: a step that checks nothing must
-      # not pass.
+      # Every fuzz target runs for a time (requirement P-2). The script
+      # fails when it finds no target: a step that checks nothing must not
+      # pass. It runs a target again once after the deadline race of
+      # go test -fuzz; see the script.
       - name: fuzz
-        run: |
-          count=0
-          for pkg in $(go list ./...); do
-            for target in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz' || true); do
-              go test "$pkg" -run '^$' -fuzz "^${target}\$" -fuzztime 10s
-              count=$((count + 1))
-            done
-          done
-          echo "fuzz targets run: $count"
-          [ "$count" -gt 0 ]
+        run: scripts/fuzz.sh 10
 
       - name: pre-push hook
         run: tests/pre-push.test.sh
+
+      # The tests of scripts/fuzz.sh, then the same tests against a script
+      # that always passes. That run must fail, or the tests prove nothing.
+      - name: fuzz script
+        run: |
+          tests/fuzz.test.sh
+          printf '#!/bin/sh\nexit 0\n' > "$RUNNER_TEMP/pass.sh"
+          chmod +x "$RUNNER_TEMP/pass.sh"
+          if tests/fuzz.test.sh "$RUNNER_TEMP/pass.sh" > /dev/null; then
+            echo "tests/fuzz.test.sh passes a script that checks nothing" >&2
+            exit 1
+          fi
