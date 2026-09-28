@@ -413,9 +413,12 @@ func TestQuery(t *testing.T) {
 		if _, err := tx.Exec("DELETE FROM repo WHERE stars IS NULL"); err != nil {
 			return err
 		}
-		rows, err := tx.Query("SELECT count(1) FROM repo")
-		if err == nil {
-			t.Error("an aggregate compiled")
+		rows, err := tx.Query("SELECT count(*) FROM repo")
+		if err != nil {
+			return err
+		}
+		if got := read(rows); strings.Join(got, "|") != "2" {
+			t.Errorf("count in the Tx: %q", got)
 		}
 		rows, err = tx.Query("SELECT id FROM repo")
 		if err != nil {

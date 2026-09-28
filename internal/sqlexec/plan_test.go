@@ -130,6 +130,8 @@ func TestPlanForms(t *testing.T) {
 		{"SELECT * FROM t ORDER BY g, name DESC LIMIT 2", "SCAN t; SORT", 1000, 2},
 		{"SELECT * FROM t WHERE g IN (1, 2) ORDER BY name LIMIT 2", "SEARCH t USING INDEX by_g ((g IN (1, 2))); SORT", 200, 2},
 		{"SELECT DISTINCT g FROM t ORDER BY g", "SCAN t; DISTINCT; SORT", 1000, 10},
+		{"SELECT g, count(*) FROM t GROUP BY g ORDER BY g", "SCAN t; GROUP; SORT", 1000, 10},
+		{"SELECT count(*) FROM t WHERE id < 100", "SEARCH t USING PRIMARY KEY ((id < 100)); GROUP", 99, 1},
 		{"SELECT * FROM t ORDER BY -id LIMIT 1", "SCAN t; SORT", 1000, 1},
 	} {
 		plan, scanned, got := ss.planned(t, c.src)

@@ -53,10 +53,16 @@ type Param struct {
 }
 
 // ColumnRef names a column, with its table or alias if Table is set.
+// With Table set to Derived, it stands for a value that a later step
+// computes, such as an aggregate. Name is then the text of that value.
 type ColumnRef struct {
 	At
 	Table, Name string
 }
+
+// Derived is the Table of a ColumnRef that stands for a computed value.
+// No name of the SQL text can be it.
+const Derived = "\x00derived"
 
 // Unary is an operator before one operand: "-", "+" or "NOT". A minus
 // directly before a number is part of the number, see Literal.

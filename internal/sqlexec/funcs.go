@@ -15,7 +15,7 @@ import (
 
 // aggregates are the functions of GROUP BY. They are not scalar
 // functions; step 21 of the roadmap runs them.
-var aggregates = map[string]bool{"count": true, "sum": true, "avg": true, "total": true}
+var aggregates = map[string]bool{"count": true, "sum": true, "avg": true}
 
 // scalar is a scalar function: its argument counts, the check of its
 // arguments before the run, and the function. The function gets values

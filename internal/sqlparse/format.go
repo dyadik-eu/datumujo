@@ -83,6 +83,9 @@ func (e *Literal) String() string {
 func (e *Param) String() string { return "?" + strconv.Itoa(e.N) }
 
 func (e *ColumnRef) String() string {
+	if e.Table == Derived {
+		return e.Name
+	}
 	if e.Table != "" {
 		return Name(e.Table) + "." + Name(e.Name)
 	}

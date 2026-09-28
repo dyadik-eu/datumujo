@@ -171,6 +171,9 @@ func (l *lexer) next() (token, error) {
 		if s == "" {
 			return token{}, errAt(at, "empty name in double quotes")
 		}
+		if strings.ContainsRune(s, 0) {
+			return token{}, errAt(at, "a name cannot hold the character NUL")
+		}
 		return token{tQuoted, s, at}, nil
 	case c == '\'':
 		s, err := l.quoted('\'', at)

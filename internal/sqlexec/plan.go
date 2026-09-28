@@ -362,7 +362,7 @@ func (q *Query) plan(s Resolver, lim Limits) {
 		return
 	}
 	a := choose(q.t, constraints(q.st.Where, s))
-	if q.distinct || len(q.order) == 0 {
+	if q.distinct || q.group != nil || len(q.order) == 0 {
 		q.access = a
 		return
 	}
@@ -585,6 +585,9 @@ func (q *Query) Plan() string {
 		parts = append(parts, "ONE ROW")
 	default:
 		parts = append(parts, q.access.describe(q.t))
+	}
+	if q.group != nil {
+		parts = append(parts, "GROUP")
 	}
 	if q.distinct {
 		parts = append(parts, "DISTINCT")

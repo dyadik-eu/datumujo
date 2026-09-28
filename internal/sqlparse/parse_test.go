@@ -210,6 +210,8 @@ func TestErrors(t *testing.T) {
 		{"SELECT 'abc", 1, 8, "' without its closing '"},
 		{"SELECT \"", 1, 8, "\" without its closing \""},
 		{"SELECT \"\"", 1, 8, "empty name"},
+		{"SELECT \"a\x00b\"", 1, 8, "cannot hold the character NUL"},
+		{"SELECT \"\x00derived\".x", 1, 8, "cannot hold the character NUL"},
 		{"SELECT 1 /* x", 1, 10, "comment without */"},
 		{"SELECT X'0'", 1, 8, "even number of hex digits"},
 		{"SELECT 12abc", 1, 8, "runs into"},
