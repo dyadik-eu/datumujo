@@ -14,6 +14,11 @@ Stage 2, a core subset of SQL, is in progress. See
 - `Tx.DropTable` and `Tx.DropIndex` free the pages of the dropped trees.
 - `Tx.Savepoint` and `Tx.RollbackTo` set a write transaction back to an
   earlier state. The transaction goes on after the rollback.
+- `DB.Exec` and `Tx.Exec` run SQL that writes: CREATE TABLE, CREATE
+  INDEX, DROP, ALTER TABLE ADD COLUMN, INSERT, UPDATE and DELETE, with
+  parameters. A failed statement changes nothing. Errors are `*SQLError`
+  with line and column. The SQL and its differences to SQLite are in
+  [docs/requirements.md](docs/requirements.md).
 
 ### File format
 

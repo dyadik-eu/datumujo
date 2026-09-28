@@ -8,11 +8,16 @@ import (
 	"unicode/utf8"
 )
 
-// Error is an error in the SQL text. It names the position.
+// Error is an error in the SQL text or in its run. It names the
+// position. Err is the cause, if another error caused it; errors.Is
+// finds it.
 type Error struct {
 	At  At
 	Msg string
+	Err error
 }
+
+func (e *Error) Unwrap() error { return e.Err }
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("line %d, column %d: %s", e.At.Line, e.At.Col, e.Msg)

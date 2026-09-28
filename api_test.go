@@ -319,3 +319,51 @@ func TestOptionsReachTheStore(t *testing.T) {
 		t.Fatalf("page size: %v %+v", err, r.Stats)
 	}
 }
+
+func TestExec(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	db := open(t, path, datumujo.Options{})
+	r, err := db.Exec(`CREATE TABLE repo (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+		CREATE UNIQUE INDEX by_name ON repo (name);
+		INSERT INTO repo (name) VALUES (?), (?)`, "alpha", "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.RowsAffected != 2 || r.LastInsertID != 2 {
+		t.Errorf("result %+v", r)
+	}
+	// One Exec is one transaction: the second statement fails, so the
+	// first is gone too.
+	_, err = db.Exec("INSERT INTO repo (name) VALUES ('gamma'); INSERT INTO repo (name) VALUES ('alpha')")
+	var se *datumujo.SQLError
+	if !errors.As(err, &se) || !errors.Is(err, datumujo.ErrUnique) || se.At.Line != 1 {
+		t.Errorf("unique conflict: %v", err)
+	}
+	// In a Tx, a failed statement changes nothing and the Tx goes on.
+	if err := db.Update(func(tx *datumujo.Tx) error {
+		if _, err := tx.Exec("INSERT INTO repo VALUES (7, 'alpha')"); !errors.Is(err, datumujo.ErrUnique) {
+			t.Errorf("in a Tx: %v", err)
+		}
+		r, err := tx.Exec("INSERT INTO repo VALUES (?, ?)", 7, "delta")
+		if err == nil && r.LastInsertID != 7 {
+			t.Errorf("LastInsertID %d", r.LastInsertID)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Read(func(v *datumujo.View) error {
+		if n := count(t, v, "repo", datumujo.ScanOptions{}); n != 3 {
+			t.Errorf("%d rows, want 3", n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("SELECT 1"); err == nil {
+		t.Error("SELECT through Exec: no error")
+	}
+	if _, err := db.Exec("INSERT INTO repo VALUES (?, 'x')", uint64(1<<63)); err == nil {
+		t.Error("parameter 2^63: no error")
+	}
+}

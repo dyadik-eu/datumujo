@@ -7,6 +7,8 @@ import (
 
 	"github.com/dyadik-eu/datumujo/internal/backup"
 	"github.com/dyadik-eu/datumujo/internal/check"
+	"github.com/dyadik-eu/datumujo/internal/sqlexec"
+	"github.com/dyadik-eu/datumujo/internal/sqlparse"
 	"github.com/dyadik-eu/datumujo/internal/store"
 	"github.com/dyadik-eu/datumujo/internal/table"
 	"github.com/dyadik-eu/datumujo/internal/vfs"
@@ -26,6 +28,8 @@ type (
 	ScanOptions = table.Options
 	Rows        = table.Rows
 	Savepoint   = table.Savepoint
+	Result      = sqlexec.Result
+	SQLError    = sqlparse.Error
 	Report      = check.Report
 	Finding     = check.Finding
 	Stats       = check.Stats
@@ -238,3 +242,46 @@ func Check(path string) (*Report, error) { return check.Run(vfs.OS{}, path) }
 // Restore makes the database to from from, a copy or a database that no
 // program has open. It fails with ErrBackup if to or to+"-log" exists.
 func Restore(from, to string) error { return backup.Restore(vfs.OS{}, from, to) }
+
+// Exec runs SQL statements that write, in one transaction. It commits
+// if all of them succeed and changes nothing otherwise. SELECT, BEGIN,
+// COMMIT and ROLLBACK are not for Exec. An error in the SQL or in its
+// run is a *SQLError with the position. The error of the table layer
+// behind it, such as ErrUnique, matches with errors.Is. The result sums the rows
+// of all statements, and LastInsertID is the one of the last INSERT.
+func (db *DB) Exec(query string, params ...any) (Result, error) {
+	var r Result
+	err := db.Update(func(tx *Tx) error {
+		var err error
+		r, err = tx.Exec(query, params...)
+		return err
+	})
+	return r, err
+}
+
+// Exec runs SQL statements that write, in the transaction. A statement
+// that fails changes nothing, and the transaction goes on (L-7). The
+// statements before it keep their changes. params[0] is ?1. A Go int
+// and the other integer types become int64.
+func (tx *Tx) Exec(query string, params ...any) (Result, error) {
+	sts, err := sqlparse.ParseAll(query)
+	if err != nil {
+		return Result{}, err
+	}
+	ps, err := sqlexec.Params(params)
+	if err != nil {
+		return Result{}, err
+	}
+	var total Result
+	for _, st := range sts {
+		r, err := sqlexec.Exec(tx.Tx, st, ps)
+		if err != nil {
+			return total, err
+		}
+		total.RowsAffected += r.RowsAffected
+		if _, ok := st.(*sqlparse.Insert); ok {
+			total.LastInsertID = r.LastInsertID
+		}
+	}
+	return total, nil
+}
