@@ -27,3 +27,27 @@ metadata in datumujo.
 
 Not in stage 1: a query language, full-text search, replication (S-4). The
 log of step 4 keeps replication possible (D-5).
+
+# Roadmap, stage 2
+
+The requirements are in [requirements.md](requirements.md), under
+"Stage 2: SQL". The rules of stage 1 hold. A step is one pull request. It
+is done when its tests are green in CI and a test or a measurement closes
+the requirements it names.
+
+| Step | Content | Closes |
+|---|---|---|
+| 14 | Requirements and this roadmap | |
+| 15 | Engine: drop a table and an index and free their pages; a savepoint in the write transaction | L-1 (drop), L-7 (basis) |
+| 16 | Lexer and parser for the subset of L-1 and L-2, with positions in errors; fuzz test: a parsed statement prints to text that parses to the same tree | L-6 |
+| 17 | Values and expressions: types, NULL, operators, CAST and the core functions; the oracle in tests | L-3, L-4, P-4 (basis) |
+| 18 | DDL and writes: CREATE, DROP, ALTER TABLE ADD COLUMN, INSERT, UPDATE, DELETE, parameters, the hidden key; Exec on DB and Tx; a statement rolls back to its savepoint | L-1, L-5, L-7, L-8 |
+| 19 | SELECT over one table: expressions, WHERE, ORDER BY, LIMIT, OFFSET, DISTINCT; Query and Rows | L-2 (part) |
+| 20 | Planner: key and index for L-9, index order for ORDER BY; the memory bound | L-9, L-10 |
+| 21 | Aggregates, GROUP BY and HAVING | L-2 (part) |
+| 22 | INNER JOIN and LEFT JOIN, with a lookup by key or index where one fits | L-2 |
+| 23 | Driver for `database/sql` | L-11 |
+| 24 | SQL shell in the command | L-12 |
+| 25 | Random statements against the oracle; the SQL dialect and its limits in the docs | P-4 |
+
+Stage 2 is tagged as v0.2.0 when step 25 is done.
