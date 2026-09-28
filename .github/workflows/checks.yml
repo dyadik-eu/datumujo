@@ -38,6 +38,11 @@ jobs:
             exit 1
           fi
 
+      # The SQL tests compare with SQLite (P-4). The version goes in the
+      # log, so a result can be traced to its oracle.
+      - name: oracle
+        run: sqlite3 --version
+
       - name: build
         run: go build ./...
 

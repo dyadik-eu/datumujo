@@ -332,6 +332,54 @@ cost is one copy of the map per savepoint, at most MaxTxBytes divided by
 the page size entries. Stage 2 takes a savepoint before each SQL
 statement, so a failed statement changes nothing (L-7).
 
+## SQL text
+
+The package `internal/sqlparse` reads SQL into a tree and prints a tree
+back to SQL. It knows no tables and no values. A name that does not exist
+is an error of a later step.
+
+Operators bind as in SQLite. From the lowest, the levels are:
+
+| Level | Operators |
+|---|---|
+| 1 | OR |
+| 2 | AND |
+| 3 | NOT |
+| 4 | `=` `!=` IS IN BETWEEN LIKE |
+| 5 | `<` `<=` `>` `>=` |
+| 6 | `+` `-` |
+| 7 | `*` `/` `%` |
+| 8 | `\|\|` |
+| 9 | unary `-` and `+` |
+
+ An IN list ends in a parenthesis.
+So an operator that binds more tightly after it takes the whole IN as
+its left operand: `a IN (1) + 2` is `(a IN (1)) + 2`, as in SQLite.
+
+The printer puts parentheses around every operator. So a test reads the
+grouping from the text, and the oracle can check it. SQLite computes
+each random expression twice: as written, and as printed. The two values
+are the same when this parser groups the operators as SQLite does. Three
+controls with a wrong grouping must give different values; otherwise
+the comparison proves nothing.
+
+Rules of the text:
+
+| Rule | Why |
+|---|---|
+| A minus directly before a number is part of the number. | -9223372036854775808 is an int64; the number without the minus is not. |
+| An integer literal past int64 is an error. A REAL literal past float64 is an error. | L-3: no silent conversion. SQLite makes a REAL and Inf. |
+| A type takes no length: `VARCHAR(20)` is an error. | The column would not check the length, and the text would say that it does. |
+| Type names are INTEGER, INT, BIGINT, REAL, DOUBLE [PRECISION], FLOAT, BOOLEAN, BOOL, TEXT, VARCHAR, BLOB, BYTEA and TIMESTAMP. | Each maps to one column type of stage 1. |
+| ADD, BEGIN, COLUMN, COMMIT, EXISTS, IF, INDEX, KEY, ROLLBACK and TRANSACTION are not reserved. | A column can be called key or index. The printer puts such a name in double quotes. |
+| A name without quotes is in lower case. A name in double quotes keeps its case. | As in SQL. |
+| `?` is one more than the largest parameter number before it in the statement; `?N` names N. | As in SQLite. The printer writes every parameter as `?N`. |
+| Expressions nest at most 200 levels deep. | Deeper text gives an error, not a stack overflow. |
+
+An error names the line and the column, in characters (L-6). A fuzz test
+parses any text. If it parses, the printed text must parse to the same
+tree and print the same again.
+
 ## Counters
 
 A counter is a number in the catalog tree, stored with the rows of the

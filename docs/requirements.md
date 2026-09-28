@@ -130,3 +130,6 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | bool | 0 and 1 | true and false; the oracle compares them as 0 and 1 |
 | time | no type | a column type; not in oracle tests |
 | rows without ORDER BY | an order | an order; the oracle compares them as a multiset |
+| `9223372036854775808`, an integer literal past int64 | a REAL | error: write a REAL with a decimal point |
+| `1e999`, a REAL literal past float64 | Inf | error |
+| `VARCHAR(20)` | the length is ignored | error: a type takes no length |
