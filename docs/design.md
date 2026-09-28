@@ -593,6 +593,39 @@ have keys over any type, every aggregate with and without DISTINCT,
 HAVING, WHERE and LIMIT. It compares a REAL sum by its bits, so it checks the
 summation of SQLite too.
 
+## Joins
+
+FROM and JOIN name tables, each under its alias or its name. The joined
+row has the columns of the first table, then those of the second, and
+so on. Each table knows the offset of its first column in that row. So
+expressions, WHERE, groups and ORDER BY work on joined rows as on the
+rows of one table.
+
+| Rule | As in SQLite |
+|---|---|
+| `t.x` looks in the table named t; `x` alone must be a column of exactly one table, else "ambiguous column name" | yes |
+| a table name twice is an error; a join of a table with itself needs an alias | yes |
+| ON reads the tables up to its own, not those after it | yes, for LEFT JOIN |
+| LEFT JOIN gives a row without a match with NULL in the columns of its table | yes |
+| `*` gives the columns of all tables in order, `t.*` those of one | yes |
+
+The join is a nested loop in the order of the query. For each row of
+the tables before, it scans the next table. That scan has a plan of its
+own. Its bounds come from the terms of ON and WHERE whose value reads
+only the tables before it: `ON i.repo = r.id` reads issue through the
+index on repo, with the value of r.id of the current row. The order of
+the tables is not changed; to choose it is part of v0.4 in the roadmap.
+
+A term of WHERE can bound the scan of the right table of a LEFT JOIN.
+This is safe: every form of term that bounds a scan is false or NULL
+for NULL. So WHERE drops the row with NULL that the join would add
+where the bounded scan finds nothing. The whole WHERE runs on each
+joined row after the join, as for one table.
+
+The oracle test makes a quarter of its random queries joins: INNER and
+LEFT, three tables, a range in ON, and a table with itself. Each one
+also runs without a plan, and both must agree with SQLite.
+
 ## Counters
 
 A counter is a number in the catalog tree, stored with the rows of the

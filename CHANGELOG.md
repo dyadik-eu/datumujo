@@ -28,6 +28,8 @@ Stage 2, a core subset of SQL, is in progress. See
 - `ScanOptions.FromExclusive` and `ScanOptions.ToInclusive` for scans.
 - GROUP BY, HAVING and the aggregates count, sum, avg, min and max, also
   with DISTINCT.
+- INNER JOIN and LEFT JOIN, with a lookup by key or index where ON or
+  WHERE allows one.
 
 ### File format
 

@@ -28,7 +28,8 @@ type Column struct {
 // Query is a compiled SELECT.
 type Query struct {
 	st       *sqlparse.Select
-	t        *table.Table // nil without FROM
+	srcs     []*source    // the tables of FROM and JOIN, in order
+	t        *table.Table // the first table; nil without FROM
 	cols     []outCol
 	names    []Column
 	where    *Expr
@@ -57,21 +58,90 @@ type orderKey struct {
 	desc bool
 }
 
-// scope resolves names in a query over one table. With FROM t AS x, the
-// name of the table is x and not t, as in SQLite.
+// source is a table of FROM or JOIN. Its columns follow the columns of
+// the tables before it in the joined row, from offset on.
+type source struct {
+	t      *table.Table
+	name   string // the alias, or the name of the table
+	offset int
+	left   bool          // LEFT JOIN
+	on     *Expr         // the ON of its JOIN; nil for FROM
+	onSt   sqlparse.Expr // the same, as written
+	access *access       // nil: a scan of every row
+}
+
+// scope resolves names over the tables of a query. A table with an
+// alias has only the alias as its name, as in SQLite. A name without a
+// table must be a column of exactly one of them.
 type scope struct {
-	t    *table.Table
-	name string
+	srcs []*source
 }
 
 func (s scope) Column(tbl, name string) (int, table.Type, error) {
-	if s.t == nil {
+	if len(s.srcs) == 0 {
 		return noColumns{}.Column(tbl, name)
 	}
-	if tbl != "" && tbl != s.name {
-		return 0, 0, fmt.Errorf("no such column: %s.%s", tbl, name)
+	found, typ := -1, table.Type(0)
+	for _, src := range s.srcs {
+		if tbl != "" && tbl != src.name {
+			continue
+		}
+		i, t, err := tableScope{src.t}.Column("", name)
+		if err != nil {
+			continue
+		}
+		if found >= 0 {
+			return 0, 0, fmt.Errorf("ambiguous column name: %s; name its table", name)
+		}
+		found, typ = i+src.offset, t
 	}
-	return tableScope{s.t}.Column("", name)
+	if found < 0 {
+		if tbl != "" {
+			return 0, 0, fmt.Errorf("no such column: %s.%s", tbl, name)
+		}
+		return 0, 0, fmt.Errorf("no such column: %s", name)
+	}
+	return found, typ, nil
+}
+
+// width returns the columns of the joined row.
+func (s scope) width() int {
+	if len(s.srcs) == 0 {
+		return 0
+	}
+	last := s.srcs[len(s.srcs)-1]
+	return last.offset + len(last.t.Columns)
+}
+
+// addSource adds a table of FROM or JOIN to the query.
+func (q *Query) addSource(sc *table.Schema, ref sqlparse.TableRef, left bool) error {
+	t, ok := sc.Table(ref.Name)
+	if !ok {
+		return wrap(ref.At, table.ErrNoTable, "no such table: %s", ref.Name)
+	}
+	name := t.Name
+	if ref.Alias != "" {
+		name = ref.Alias
+	}
+	for _, other := range q.srcs {
+		if other.name == name {
+			return errAt(ref.At, "the table name %s is used twice; give one of them an alias", name)
+		}
+	}
+	src := &source{t: t, name: name, left: left, offset: scope{q.srcs}.width()}
+	q.srcs = append(q.srcs, src)
+	return nil
+}
+
+// starWidth returns the columns that an item * or t.* gives.
+func (q *Query) starWidth(it sqlparse.SelectItem) int {
+	n := 0
+	for _, src := range q.srcs {
+		if it.Table == "" || it.Table == src.name {
+			n += len(visible(src.t))
+		}
+	}
+	return n
 }
 
 // notYet refuses a part of SELECT that a later step of the roadmap adds.
@@ -81,21 +151,29 @@ func notYet(at sqlparse.At, what string, step int) error {
 
 // Prepare compiles a SELECT against a schema and chooses its plan.
 func Prepare(sc *table.Schema, st *sqlparse.Select, lim Limits) (*Query, error) {
-	if len(st.Joins) > 0 {
-		return nil, notYet(st.Joins[0].At, "JOIN", 22)
-	}
 	q := &Query{st: st, distinct: st.Distinct, lim: lim}
-	var s scope
 	if st.From != nil {
-		t, ok := sc.Table(st.From.Name)
-		if !ok {
-			return nil, wrap(st.From.At, table.ErrNoTable, "no such table: %s", st.From.Name)
+		if err := q.addSource(sc, *st.From, false); err != nil {
+			return nil, err
 		}
-		q.t, s = t, scope{t: t, name: t.Name}
-		if st.From.Alias != "" {
-			s.name = st.From.Alias
+		for _, j := range st.Joins {
+			if err := q.addSource(sc, j.Table, j.Left); err != nil {
+				return nil, err
+			}
+			// ON reads the tables up to its own, not those after it.
+			src := q.srcs[len(q.srcs)-1]
+			on, err := Compile(j.On, scope{q.srcs})
+			if err != nil {
+				return nil, err
+			}
+			if typ, ok := on.Type(); ok && typ != table.Bool {
+				return nil, errAt(j.On.Pos(), "ON needs BOOLEAN, and %s is %s", j.On, TypeName(typ))
+			}
+			src.on, src.onSt = on, j.On
 		}
+		q.t = q.srcs[0].t
 	}
+	s := scope{q.srcs}
 	grouped := len(st.GroupBy) > 0 || st.Having != nil
 	for _, it := range st.Items {
 		grouped = grouped || !it.Star && hasAggregate(it.Expr)
@@ -116,13 +194,18 @@ func Prepare(sc *table.Schema, st *sqlparse.Select, lim Limits) (*Query, error) 
 			if q.t == nil {
 				return nil, errAt(it.At, "* needs a table in FROM")
 			}
-			if it.Table != "" && it.Table != s.name {
+			if q.starWidth(it) == 0 && it.Table != "" {
 				return nil, errAt(it.At, "no such table: %s", it.Table)
 			}
-			for _, i := range visible(q.t) {
-				c := q.t.Columns[i]
-				q.cols = append(q.cols, outCol{row: i})
-				q.names = append(q.names, Column{Name: c.Name, Type: c.Type, Known: true})
+			for _, src := range q.srcs {
+				if it.Table != "" && it.Table != src.name {
+					continue
+				}
+				for _, i := range visible(src.t) {
+					c := src.t.Columns[i]
+					q.cols = append(q.cols, outCol{row: i + src.offset})
+					q.names = append(q.names, Column{Name: c.Name, Type: c.Type, Known: true})
+				}
 			}
 			continue
 		}
@@ -193,7 +276,7 @@ func (q *Query) orderKey(o sqlparse.Order, s scope) (orderKey, error) {
 		out := 0
 		for _, it := range q.st.Items {
 			if it.Star {
-				out += len(visible(q.t))
+				out += q.starWidth(it)
 				continue
 			}
 			if it.Alias == ref.Name {
@@ -344,7 +427,7 @@ func (q *Query) source(src Source, params []any, scanned *int64) (func() (*srcRo
 		}
 	} else {
 		var err error
-		if read, err = readRows(src, q.t, q.access, params, q.st.At, scanned); err != nil {
+		if read, err = q.joinRead(src, params, scanned); err != nil {
 			return nil, err
 		}
 	}
@@ -520,11 +603,11 @@ func (r *Rows) Columns() []Column { return r.q.names }
 
 // readRows returns a function that reads the rows of an access, one row
 // at a time over all its scans. A nil access reads every row by the key.
-func readRows(src Source, t *table.Table, a *access, params []any, at sqlparse.At, scanned *int64) (func() ([]any, bool, error), error) {
+func readRows(src Source, t *table.Table, a *access, outer, params []any, at sqlparse.At, scanned *int64) (func() ([]any, bool, error), error) {
 	opts := []table.Options{{}}
 	if a != nil {
 		var err error
-		if opts, err = a.scans(t, params); err != nil {
+		if opts, err = a.scans(t, outer, params); err != nil {
 			return nil, err
 		}
 	}
@@ -590,4 +673,63 @@ func (q *Query) groupSource(read func() ([]any, bool, error), params []any) (fun
 		}
 		return nil, nil
 	}, nil
+}
+
+// joinRead returns a function that gives the joined rows of the tables of
+// FROM and JOIN, one at a time, before WHERE. It is a nested loop in the
+// order of the query. For each row of the tables before, it scans the
+// next table, with the values of that row in the bounds of its plan. A
+// row of a LEFT JOIN without a match gives the row before with NULL in
+// the columns of the table.
+func (q *Query) joinRead(src Source, params []any, scanned *int64) (func() ([]any, bool, error), error) {
+	first := q.srcs[0]
+	read, err := readRows(src, first.t, first.access, nil, params, q.st.At, scanned)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range q.srcs[1:] {
+		read = q.joinStep(src, s, read, params, scanned)
+	}
+	return read, nil
+}
+
+// joinStep joins the rows of prev with the rows of the table of s.
+func (q *Query) joinStep(src Source, s *source, prev func() ([]any, bool, error), params []any, scanned *int64) func() ([]any, bool, error) {
+	var prefix []any
+	var inner func() ([]any, bool, error)
+	matched := false
+	return func() ([]any, bool, error) {
+		for {
+			if inner == nil {
+				p, ok, err := prev()
+				if err != nil || !ok {
+					return nil, false, err
+				}
+				prefix, matched = p, false
+				if inner, err = readRows(src, s.t, s.access, prefix, params, s.onSt.Pos(), scanned); err != nil {
+					return nil, false, err
+				}
+			}
+			row, ok, err := inner()
+			if err != nil {
+				return nil, false, err
+			}
+			if !ok {
+				inner = nil
+				if s.left && !matched {
+					return append(append([]any(nil), prefix...), make([]any, len(s.t.Columns))...), true, nil
+				}
+				continue
+			}
+			joined := append(append([]any(nil), prefix...), row...)
+			keep, err := keeps(s.on, s.onSt, joined, params)
+			if err != nil {
+				return nil, false, err
+			}
+			if keep {
+				matched = true
+				return joined, true, nil
+			}
+		}
+	}
 }

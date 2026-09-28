@@ -152,3 +152,4 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | a column neither in GROUP BY nor in an aggregate | the value of some row of the group | error |
 | `sum` or `avg` of TEXT or BOOLEAN | the values as numbers: 'a' is 0, TRUE is 1 | error: they need INTEGER or REAL |
 | `sum` of REAL past float64 | Inf | error: REAL overflow |
+| `count()` without an argument | the same as `count(*)` | error: write `count(*)` |

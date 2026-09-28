@@ -227,6 +227,88 @@ func (g queries) aggQuery(tb tableInfo) (src string, names []string, ordered boo
 	return b.String(), names, ordered
 }
 
+// qualify returns the columns of a table under a name, as name.column.
+func qualify(tb tableInfo, name string) tableInfo {
+	q := tableInfo{name: name, cols: map[byte][]string{}, order: tb.order}
+	for typ, cs := range tb.cols {
+		for _, c := range cs {
+			q.cols[typ] = append(q.cols[typ], name+"."+c)
+		}
+	}
+	for _, c := range tb.all {
+		q.all = append(q.all, name+"."+c)
+	}
+	return q
+}
+
+// joins are the shapes of the joins of the test. Each has the text after
+// FROM, the tables under their names, and whether WHERE can name columns
+// without a table. The column names of t1, t2 and t3 differ, so it can,
+// except in a join of a table with itself.
+var joins = []struct {
+	from     string
+	tables   []tableInfo
+	bareCond bool
+}{
+	{"t1 JOIN t2 ON t2.n = t1.a", []tableInfo{qualify(queryTables[0], "t1"), qualify(queryTables[1], "t2")}, true},
+	{"t1 LEFT JOIN t2 ON t2.n = t1.a AND t2.w > 0.5", []tableInfo{qualify(queryTables[0], "t1"), qualify(queryTables[1], "t2")}, true},
+	{"t2 LEFT JOIN t1 ON t1.id = t2.n", []tableInfo{qualify(queryTables[1], "t2"), qualify(queryTables[0], "t1")}, true},
+	{"t1 JOIN t3 ON t3.x = t1.a", []tableInfo{qualify(queryTables[0], "t1"), qualify(queryTables[2], "t3")}, true},
+	{"t3 LEFT JOIN t1 ON t1.b = t3.y", []tableInfo{qualify(queryTables[2], "t3"), qualify(queryTables[0], "t1")}, true},
+	{"t1 JOIN t2 ON t2.n = t1.a LEFT JOIN t3 ON t3.x = t2.n", []tableInfo{qualify(queryTables[0], "t1"), qualify(queryTables[1], "t2"), qualify(queryTables[2], "t3")}, true},
+	{"t2 JOIN t1 ON t1.a >= t2.n AND t1.a < t2.n + 3", []tableInfo{qualify(queryTables[1], "t2"), qualify(queryTables[0], "t1")}, true},
+	{"t1 AS p LEFT JOIN t1 AS q ON q.id = p.a", []tableInfo{qualify(queryTables[0], "p"), qualify(queryTables[0], "q")}, false},
+}
+
+// joinQuery writes one SELECT over a join.
+func (g queries) joinQuery() (src string, names []string, ordered bool) {
+	w := g.w
+	j := joins[w.r.Intn(len(joins))]
+	var items []string
+	for n := 1 + w.r.Intn(4); len(items) < n; {
+		if e := g.expr(j.tables[w.r.Intn(len(j.tables))], "iftbx"[w.r.Intn(5)]); e != "" {
+			items = append(items, e)
+		}
+	}
+	grouped := w.r.Intn(4) == 0
+	if grouped {
+		items = items[:1]
+		arg := ""
+		for arg == "" {
+			arg = g.expr(j.tables[len(j.tables)-1], "iftbx"[w.r.Intn(5)])
+		}
+		items = append(items, "count(*)", "count("+arg+")")
+	}
+	var b strings.Builder
+	b.WriteString("SELECT ")
+	for i, it := range items {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		names = append(names, "c"+strconv.Itoa(i+1))
+		b.WriteString(it + " AS " + names[i])
+	}
+	b.WriteString(" FROM " + j.from)
+	if j.bareCond && w.r.Intn(2) == 0 {
+		b.WriteString(" WHERE " + w.cond(j.tables[w.r.Intn(len(j.tables))].name))
+	}
+	if grouped {
+		b.WriteString(" GROUP BY " + items[0])
+	}
+	if w.r.Intn(2) == 0 {
+		var ns []string
+		for i := range names {
+			ns = append(ns, strconv.Itoa(i+1))
+		}
+		b.WriteString(" ORDER BY " + strings.Join(ns, ", "))
+		ordered = true
+		if w.r.Intn(3) == 0 {
+			fmt.Fprintf(&b, " LIMIT %d", w.r.Intn(6))
+		}
+	}
+	return b.String(), names, ordered
+}
+
 // TestSelectAgainstSQLite fills the tables with a random workload in
 // SQLite and here, then runs random queries in both. The rows must be
 // the same, in the same order where the query orders them totally, and
@@ -267,9 +349,12 @@ func selectAgainstSQLite(t *testing.T, seed int64) {
 		var src string
 		var names []string
 		var ordered bool
-		if w.r.Intn(3) == 0 {
+		switch w.r.Intn(4) {
+		case 0:
 			src, names, ordered = g.aggQuery(tb)
-		} else {
+		case 1:
+			src, names, ordered = g.joinQuery()
+		default:
 			src, names, ordered = g.query(tb)
 		}
 		qs = append(qs, q{src, names, ordered})
@@ -342,6 +427,9 @@ func selectAgainstSQLite(t *testing.T, seed int64) {
 		if strings.Contains(plan, "GROUP") {
 			plans["GROUP"]++
 		}
+		if strings.Count(plan, "SCAN")+strings.Count(plan, "SEARCH") > 1 {
+			plans["JOIN"]++
+		}
 		their := append([]string(nil), theirs[i]...)
 		if !x.ordered {
 			sort.Strings(ours)
@@ -361,8 +449,8 @@ func selectAgainstSQLite(t *testing.T, seed int64) {
 	t.Logf("%d queries, %d in total order, %d rows compared; plans %v", len(qs), ordered, rowsSeen, plans)
 	// A third of the queries group rows and have WHERE less often, so
 	// one in twenty is the floor.
-	if plans["SEARCH"] < len(qs)/20 || plans["GROUP"] < len(qs)/5 {
-		t.Errorf("of %d queries, %d used a search and %d grouped rows; the test does not reach the plan or the groups", len(qs), plans["SEARCH"], plans["GROUP"])
+	if plans["SEARCH"] < len(qs)/20 || plans["GROUP"] < len(qs)/8 || plans["JOIN"] < len(qs)/8 {
+		t.Errorf("of %d queries, %d used a search, %d grouped rows and %d joined tables; the test does not reach them all", len(qs), plans["SEARCH"], plans["GROUP"], plans["JOIN"])
 	}
 	if rowsSeen < 2000 {
 		t.Errorf("only %d rows compared", rowsSeen)

@@ -426,7 +426,7 @@ func matching(tx *table.Tx, t *table.Table, w *Expr, e sqlparse.Expr, at sqlpars
 	if !lim.NoIndex {
 		a = choose(t, constraints(e, tableScope{t}))
 	}
-	read, err := readRows(tx, t, a, params, at, scanned)
+	read, err := readRows(tx, t, a, nil, params, at, scanned)
 	if err != nil {
 		return nil, err
 	}
