@@ -459,6 +459,39 @@ decides the outcome, and SQLite visits them in another order.
 The rows that an UPDATE or a DELETE changes are in memory until the
 statement ends. Step 20 bounds this memory (L-10).
 
+## Queries
+
+`Query` runs one SELECT over one table on a DB, a View or a Tx. A query
+of a DB holds a view of the last commit until its rows are closed.
+While it is open, no checkpoint runs (T-5).
+
+The parts run in the order of SQL: WHERE, the select list, DISTINCT,
+ORDER BY, then OFFSET and LIMIT. The rules follow SQLite:
+
+| Part | Rule |
+|---|---|
+| `*` | the columns of the table without the hidden key; `rowid` names that one |
+| alias of the table | with `FROM t AS x`, the columns are `x.c`; `t.c` is an error |
+| ORDER BY | a number is a column of the result, a name that is an alias in the result is that column, anything else is an expression over the row of the table |
+| order | NULL first in ascending order; rows with equal keys keep the order of the table |
+| DISTINCT | NULL equals NULL, and 3 equals 3.0; the first row of a group stays |
+| LIMIT, OFFSET | INTEGER; a negative LIMIT is no limit, a negative OFFSET skips no row |
+| no FROM | one row, which WHERE can drop |
+
+A query without ORDER BY and DISTINCT streams. It reads the next row of
+the table when the program asks for it. An error in a row ends the rows
+with Err, after the rows before it. A query with ORDER BY or DISTINCT
+reads all rows that pass WHERE first. Step 20 bounds this memory (L-10).
+
+GROUP BY, HAVING, aggregates and JOIN are errors that name the step of
+the roadmap that adds them.
+
+The oracle test fills the tables with the workload of the writes and
+150 more INSERTs. Then it runs 600 random queries in SQLite and here.
+Where a query orders its rows totally, the rows must come in the same
+order. For this, each ORDER BY ends with the key, and DISTINCT orders by
+all columns. The other queries compare their rows as a multiset.
+
 ## Counters
 
 A counter is a number in the catalog tree, stored with the rows of the

@@ -367,3 +367,86 @@ func TestExec(t *testing.T) {
 		t.Error("parameter 2^63: no error")
 	}
 }
+
+func TestQuery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	db := open(t, path, datumujo.Options{CheckpointBytes: -1})
+	if _, err := db.Exec(`CREATE TABLE repo (id INTEGER PRIMARY KEY, name TEXT NOT NULL, stars INTEGER);
+		INSERT INTO repo (name, stars) VALUES ('alpha', 5), ('beta', NULL), ('gamma', 12)`); err != nil {
+		t.Fatal(err)
+	}
+	read := func(rows *datumujo.SQLRows) []string {
+		t.Helper()
+		var out []string
+		for rows.Next() {
+			out = append(out, strings.TrimSuffix(fmt.Sprintln(rows.Row()...), "\n"))
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	rows, err := db.Query("SELECT name, stars FROM repo WHERE stars > ? ORDER BY stars DESC", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cols := rows.Columns(); len(cols) != 2 || cols[0].Name != "name" || cols[1].Type != datumujo.Int64 {
+		t.Errorf("columns %+v", cols)
+	}
+	// While the rows hold their view, a checkpoint cannot run.
+	if _, err := db.Exec("INSERT INTO repo (name) VALUES ('delta')"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := db.Checkpoint(); ok || err != nil {
+		t.Errorf("checkpoint with open rows: %v %v", ok, err)
+	}
+	if got := read(rows); strings.Join(got, "|") != "gamma 12|alpha 5" {
+		t.Errorf("rows %q", got)
+	}
+	rows.Close()
+	rows.Close()
+	if ok, err := db.Checkpoint(); !ok || err != nil {
+		t.Errorf("checkpoint after Close: %v %v", ok, err)
+	}
+	// A Tx sees its own rows; a View sees its commit.
+	if err := db.Update(func(tx *datumujo.Tx) error {
+		if _, err := tx.Exec("DELETE FROM repo WHERE stars IS NULL"); err != nil {
+			return err
+		}
+		rows, err := tx.Query("SELECT count(1) FROM repo")
+		if err == nil {
+			t.Error("an aggregate compiled")
+		}
+		rows, err = tx.Query("SELECT id FROM repo")
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		if got := read(rows); strings.Join(got, "|") != "1|3" {
+			t.Errorf("in the Tx: %q", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Read(func(v *datumujo.View) error {
+		rows, err := v.Query("SELECT name FROM repo ORDER BY name")
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		if got := read(rows); strings.Join(got, "|") != "alpha|gamma" {
+			t.Errorf("in a View: %q", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var se *datumujo.SQLError
+	if _, err := db.Query("DELETE FROM repo"); !errors.As(err, &se) {
+		t.Errorf("DELETE through Query: %v", err)
+	}
+	if _, err := db.Query("SELECT nosuch FROM repo"); !errors.As(err, &se) || se.At.Col != 8 {
+		t.Errorf("unknown column: %v", err)
+	}
+}
