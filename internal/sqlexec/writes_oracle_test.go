@@ -187,11 +187,18 @@ func writesAgainstSQLite(t *testing.T, seed int64, n int) {
 	lines, sqliteErrs := sqlitetest.RunErrors(t, script.String())
 
 	ss := newSession(t, store.Options{})
+	plain := newSession(t, store.Options{})
+	plain.lim = Limits{NoIndex: true}
 	ours := make([]error, len(stmts))
 	changes := make([]int64, len(stmts))
 	for i, s := range stmts {
 		r, err := ss.exec(s)
 		ours[i], changes[i] = err, r.RowsAffected
+		// The same statement without a plan must end the same way.
+		r2, err2 := plain.exec(s)
+		if (err == nil) != (err2 == nil) || r2.RowsAffected != r.RowsAffected {
+			t.Errorf("statement %d: %s\n with the plan %+v %v, without %+v %v", i, s, r, err, r2, err2)
+		}
 	}
 	theirChanges := map[int]string{}
 	var theirDump []string

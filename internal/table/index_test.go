@@ -787,3 +787,100 @@ func FuzzDecodeIndexKey(f *testing.F) {
 		}
 	})
 }
+
+// TestExclusiveAndInclusiveBounds checks FromExclusive and ToInclusive
+// against a filter over all rows, through the key and through an index,
+// in both directions. The key includes the largest int64, whose key form
+// is all 0xFF bytes: nothing is after it.
+func TestExclusiveAndInclusiveBounds(t *testing.T) {
+	s := openStore(t, vfs.NewSim())
+	stx, tx := begin(t, s)
+	defer stx.Rollback()
+	if err := tx.CreateTable(Def{Name: "t", Columns: []Column{
+		{Name: "id", Type: Int64}, {Name: "g", Type: String, Null: true},
+	}, Key: []string{"id"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.CreateIndex("t", IndexDef{Name: "by_g", Columns: []string{"g"}}); err != nil {
+		t.Fatal(err)
+	}
+	ids := []int64{math.MinInt64, -5, 0, 1, 2, 3, 7, 8, math.MaxInt64}
+	groups := []any{"a", "b", nil, "b", "c", "a", "b", "c", "b"}
+	for i, id := range ids {
+		if err := tx.Insert("t", Row{id, groups[i]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scan := func(o Options) []int64 {
+		t.Helper()
+		rows, err := tx.Scan("t", o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []int64
+		for rows.Next() {
+			out = append(out, rows.Row()[0].(int64))
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	// want filters all rows in the order of a scan without bounds.
+	want := func(o Options, keep func(id int64, g any) bool) []int64 {
+		all := scan(Options{Index: o.Index, Reverse: o.Reverse})
+		var out []int64
+		for _, id := range all {
+			i := sort.Search(len(ids), func(i int) bool { return ids[i] >= id })
+			if keep(id, groups[i]) {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	cmpG := func(g any, b string) int {
+		if g == nil {
+			return -1 // null sorts first in an index
+		}
+		return strings.Compare(g.(string), b)
+	}
+	for _, from := range []int64{math.MinInt64, -6, 0, 2, 7, math.MaxInt64} {
+		for _, to := range []int64{math.MinInt64, 0, 3, 8, math.MaxInt64} {
+			for _, fx := range []bool{false, true} {
+				for _, ti := range []bool{false, true} {
+					for _, rev := range []bool{false, true} {
+						o := Options{From: []any{from}, To: []any{to}, FromExclusive: fx, ToInclusive: ti, Reverse: rev}
+						w := want(o, func(id int64, _ any) bool {
+							lo := id > from || !fx && id == from
+							hi := id < to || ti && id == to
+							return lo && hi
+						})
+						if got := scan(o); fmt.Sprint(got) != fmt.Sprint(w) {
+							t.Errorf("key %+v: %v, want %v", o, got, w)
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, from := range []string{"", "a", "b", "bb", "c", "d"} {
+		for _, to := range []string{"a", "b", "c", "z"} {
+			for _, fx := range []bool{false, true} {
+				for _, ti := range []bool{false, true} {
+					o := Options{Index: "by_g", From: []any{from}, To: []any{to}, FromExclusive: fx, ToInclusive: ti}
+					w := want(o, func(_ int64, g any) bool {
+						lo := cmpG(g, from) > 0 || !fx && cmpG(g, from) == 0
+						hi := cmpG(g, to) < 0 || ti && cmpG(g, to) == 0
+						return g != nil && lo && hi
+					})
+					if got := scan(o); fmt.Sprint(got) != fmt.Sprint(w) {
+						t.Errorf("index %+v: %v, want %v", o, got, w)
+					}
+				}
+			}
+		}
+	}
+	if got := scan(Options{From: []any{int64(math.MaxInt64)}, FromExclusive: true}); len(got) != 0 {
+		t.Errorf("after the largest int64: %v", got)
+	}
+}

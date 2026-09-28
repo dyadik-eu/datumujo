@@ -36,6 +36,8 @@ type Query struct {
 	distinct bool
 	limit    *Expr
 	offset   *Expr
+	access   *access // nil: read every row
+	lim      Limits
 }
 
 // outCol computes one column of the result from a row of the table:
@@ -75,8 +77,8 @@ func notYet(at sqlparse.At, what string, step int) error {
 	return wrap(at, ErrStatement, "%s is not supported yet (roadmap step %d)", what, step)
 }
 
-// Prepare compiles a SELECT against a schema.
-func Prepare(sc *table.Schema, st *sqlparse.Select) (*Query, error) {
+// Prepare compiles a SELECT against a schema and chooses its plan.
+func Prepare(sc *table.Schema, st *sqlparse.Select, lim Limits) (*Query, error) {
 	switch {
 	case len(st.Joins) > 0:
 		return nil, notYet(st.Joins[0].At, "JOIN", 22)
@@ -85,7 +87,7 @@ func Prepare(sc *table.Schema, st *sqlparse.Select) (*Query, error) {
 	case st.Having != nil:
 		return nil, notYet(st.Having.Pos(), "HAVING", 21)
 	}
-	q := &Query{st: st, distinct: st.Distinct}
+	q := &Query{st: st, distinct: st.Distinct, lim: lim}
 	var s scope
 	if st.From != nil {
 		t, ok := sc.Table(st.From.Name)
@@ -154,6 +156,7 @@ func Prepare(sc *table.Schema, st *sqlparse.Select) (*Query, error) {
 			return nil, err
 		}
 	}
+	q.plan(s, lim)
 	return q, nil
 }
 
@@ -210,12 +213,17 @@ func (q *Query) Columns() []Column { return q.names }
 
 // Rows walks the result of a query.
 type Rows struct {
-	q    *Query
-	next func() ([]any, error) // nil at the end
-	row  []any
-	err  error
-	done bool
+	q       *Query
+	next    func() ([]any, error) // nil at the end
+	row     []any
+	err     error
+	done    bool
+	scanned *int64
 }
+
+// Scanned returns the number of rows of the table that the query has
+// read so far. The tests use it to show what a plan saves.
+func (r *Rows) Scanned() int64 { return *r.scanned }
 
 // Run runs the query on src. A query without ORDER BY and DISTINCT
 // streams: it reads the next row of the table when Next asks for it. The
@@ -233,12 +241,13 @@ func (q *Query) Run(src Source, params []any) (*Rows, error) {
 			return nil, err
 		}
 	}
-	in, err := q.source(src, params)
+	scanned := new(int64)
+	in, err := q.source(src, params, scanned)
 	if err != nil {
 		return nil, err
 	}
 	var next func() ([]any, error)
-	if len(q.order) == 0 && !q.distinct {
+	if (len(q.order) == 0 || q.sorted()) && !q.distinct {
 		next = func() ([]any, error) {
 			r, err := in()
 			if err != nil || r == nil {
@@ -280,7 +289,7 @@ func (q *Query) Run(src Source, params []any) (*Rows, error) {
 		}
 		return r, err
 	}
-	return &Rows{q: q, next: next}, nil
+	return &Rows{q: q, next: next, scanned: scanned}, nil
 }
 
 // boundValue runs LIMIT or OFFSET. As in SQLite, a negative LIMIT is no
@@ -307,7 +316,7 @@ type srcRow struct {
 
 // source returns a function that gives the next row that passes WHERE,
 // or nil at the end.
-func (q *Query) source(src Source, params []any) (func() (*srcRow, error), error) {
+func (q *Query) source(src Source, params []any, scanned *int64) (func() (*srcRow, error), error) {
 	var read func() ([]any, bool, error)
 	if q.t == nil {
 		once := false
@@ -319,15 +328,9 @@ func (q *Query) source(src Source, params []any) (func() (*srcRow, error), error
 			return nil, true, nil
 		}
 	} else {
-		rows, err := src.Scan(q.t.Name, table.Options{})
-		if err != nil {
-			return nil, engineErr(q.st.At, err)
-		}
-		read = func() ([]any, bool, error) {
-			if !rows.Next() {
-				return nil, false, engineErr(q.st.At, rows.Err())
-			}
-			return rows.Row(), true, nil
+		var err error
+		if read, err = readRows(src, q.t, q.access, params, q.st.At, scanned); err != nil {
+			return nil, err
 		}
 	}
 	return func() (*srcRow, error) {
@@ -371,6 +374,7 @@ func (q *Query) source(src Source, params []any) (func() (*srcRow, error), error
 func (q *Query) collect(in func() (*srcRow, error)) ([]*srcRow, error) {
 	var all []*srcRow
 	seen := map[string]bool{}
+	mem := memory{max: q.lim.maxMemory(), at: q.st.At}
 	for {
 		r, err := in()
 		if err != nil {
@@ -378,6 +382,12 @@ func (q *Query) collect(in func() (*srcRow, error)) ([]*srcRow, error) {
 		}
 		if r == nil {
 			break
+		}
+		if err := mem.add(r.out); err != nil {
+			return nil, err
+		}
+		if err := mem.add(r.keys); err != nil {
+			return nil, err
 		}
 		if q.distinct {
 			k := distinctKey(r.out)
@@ -489,3 +499,38 @@ func (r *Rows) Err() error { return r.err }
 
 // Columns returns the columns of the result.
 func (r *Rows) Columns() []Column { return r.q.names }
+
+// readRows returns a function that reads the rows of an access, one row
+// at a time over all its scans. A nil access reads every row by the key.
+func readRows(src Source, t *table.Table, a *access, params []any, at sqlparse.At, scanned *int64) (func() ([]any, bool, error), error) {
+	opts := []table.Options{{}}
+	if a != nil {
+		var err error
+		if opts, err = a.scans(t, params); err != nil {
+			return nil, err
+		}
+	}
+	var rows *table.Rows
+	return func() ([]any, bool, error) {
+		for {
+			if rows == nil {
+				if len(opts) == 0 {
+					return nil, false, nil
+				}
+				var err error
+				if rows, err = src.Scan(t.Name, opts[0]); err != nil {
+					return nil, false, engineErr(at, err)
+				}
+				opts = opts[1:]
+			}
+			if rows.Next() {
+				*scanned++
+				return rows.Row(), true, nil
+			}
+			if err := rows.Err(); err != nil {
+				return nil, false, engineErr(at, err)
+			}
+			rows = nil
+		}
+	}, nil
+}

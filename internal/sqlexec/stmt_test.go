@@ -20,6 +20,7 @@ type session struct {
 	s   *store.Store
 	stx *store.Tx
 	tx  *table.Tx
+	lim Limits
 }
 
 func newSession(t testing.TB, opt store.Options) *session {
@@ -58,7 +59,7 @@ func (ss *session) exec(src string, params ...any) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return Exec(ss.tx, st, params)
+	return Exec(ss.tx, st, params, ss.lim)
 }
 
 func (ss *session) must(src string, params ...any) Result {
@@ -102,14 +103,14 @@ func TestInsertAndKeys(t *testing.T) {
 		params []any
 		want   Result
 	}{
-		{"INSERT INTO note VALUES ('a', 1), ('b', NULL)", nil, Result{2, 2}},
-		{"INSERT INTO note (n) VALUES (?)", []any{int64(3)}, Result{1, 3}},
-		{"INSERT INTO note (rowid, body) VALUES (-5, 'c')", nil, Result{1, -5}},
-		{"INSERT INTO issue (title) VALUES ('one')", nil, Result{1, 1}},
-		{"INSERT INTO issue VALUES (10, 'ten', 2), (NULL, 'eleven', NULL)", nil, Result{2, 11}},
-		{"INSERT INTO issue (id, title, score) VALUES (?1, ?2, ?3)", []any{int64(-3), "neg", 1.5}, Result{1, -3}},
+		{"INSERT INTO note VALUES ('a', 1), ('b', NULL)", nil, Result{RowsAffected: 2, LastInsertID: 2}},
+		{"INSERT INTO note (n) VALUES (?)", []any{int64(3)}, Result{RowsAffected: 1, LastInsertID: 3}},
+		{"INSERT INTO note (rowid, body) VALUES (-5, 'c')", nil, Result{RowsAffected: 1, LastInsertID: -5}},
+		{"INSERT INTO issue (title) VALUES ('one')", nil, Result{RowsAffected: 1, LastInsertID: 1}},
+		{"INSERT INTO issue VALUES (10, 'ten', 2), (NULL, 'eleven', NULL)", nil, Result{RowsAffected: 2, LastInsertID: 11}},
+		{"INSERT INTO issue (id, title, score) VALUES (?1, ?2, ?3)", []any{int64(-3), "neg", 1.5}, Result{RowsAffected: 1, LastInsertID: -3}},
 	} {
-		if r := ss.must(c.src, c.params...); r != c.want {
+		if r := ss.must(c.src, c.params...); r.RowsAffected != c.want.RowsAffected || r.LastInsertID != c.want.LastInsertID {
 			t.Errorf("%s: %+v, want %+v", c.src, r, c.want)
 		}
 	}
