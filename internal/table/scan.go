@@ -17,6 +17,9 @@ type Options struct {
 	To      []any  // only rows before these values
 	After   []byte // continue after this cursor, in scan order
 	Reverse bool   // from the last row to the first
+
+	FromExclusive bool // With it, rows must be after From.
+	ToInclusive   bool // With it, rows may be at To.
 }
 
 // Rows walks the rows of a scan.
@@ -59,6 +62,17 @@ func (v *View) Scan(table string, o Options) (*Rows, error) {
 	}
 	if to, err = bound(t, cols, o.To); err != nil {
 		return nil, err
+	}
+	if o.FromExclusive && len(o.From) > 0 {
+		// Every key with the From values starts with from, because key
+		// forms are prefix-free. The first key after all of them is its
+		// successor. Without one, no key is after From.
+		if from = successor(from); from == nil {
+			r.done = true
+		}
+	}
+	if o.ToInclusive && len(o.To) > 0 {
+		to = successor(to) // nil: no key is after To, so no upper bound
 	}
 	r.lower = maxLower(prefix, from)
 	r.upper = minUpper(successor(prefix), to)
