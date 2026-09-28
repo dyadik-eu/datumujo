@@ -147,3 +147,5 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | `INT PRIMARY KEY` without a value | NULL; only `INTEGER PRIMARY KEY` takes the next key | the next key, for every integer type name |
 | `"Foo"` and `foo` | the same name | two names: a quoted name keeps its case, as in the SQL standard |
 | the rows an UPDATE visits first | in rowid order | in key order; a statement that fails for one order can succeed for the other |
+| the name of a result column without an alias | the text as written: `1+1` | the expression as printed: `(1 + 1)` |
+| NaN in ORDER BY | NaN is stored as NULL | NaN sorts after NULL and before every other value |

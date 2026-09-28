@@ -19,6 +19,9 @@ Stage 2, a core subset of SQL, is in progress. See
   parameters. A failed statement changes nothing. Errors are `*SQLError`
   with line and column. The SQL and its differences to SQLite are in
   [docs/requirements.md](docs/requirements.md).
+- `DB.Query`, `View.Query` and `Tx.Query` run a SELECT over one table:
+  expressions, WHERE, ORDER BY, DISTINCT, LIMIT and OFFSET. The rows are
+  `*SQLRows`; close them to end the view of a query of a DB.
 
 ### File format
 
