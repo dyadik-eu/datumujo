@@ -380,6 +380,46 @@ An error names the line and the column, in characters (L-6). A fuzz test
 parses any text. If it parses, the printed text must parse to the same
 tree and print the same again.
 
+## Values and expressions
+
+The package `internal/sqlexec` compiles an expression, then runs it for
+a row with the parameters. A value is a value of the table layer: nil,
+int64, float64, bool, string, []byte or time.Time. So a row goes into a
+table as it is.
+
+The compiler checks the types before the run (L-3). `'1' = 1`, `1 + 'a'`
+and `WHERE 1` are errors, with the position, before any row is read.
+The type of a parameter is known only at the run, and so is the type of
+NULL. The run checks them there. A value of an expression whose type is
+known before the run has that type; a fuzz test checks this. So a CASE
+with an INTEGER branch never gives a TEXT from a parameter.
+
+The rules follow SQLite where a value fits its type:
+
+| Rule | Detail |
+|---|---|
+| INTEGER with INTEGER | stays INTEGER; `/` cuts towards zero, `%` keeps the sign of the left side |
+| INTEGER with REAL | gives REAL |
+| comparison of INTEGER and REAL | exact: 9007199254740993 is greater than 9007199254740992.0 |
+| NULL | a comparison with NULL is NULL; AND, OR and NOT use three values |
+| AND, OR | the right side does not run when the left side decides |
+| LIKE | `%` any run, `_` one character; A to Z match their lower case, other letters only themselves |
+| lower, upper | A to Z only |
+| round | half away from zero, on the exact binary value: `round(2.675, 2)` is 2.67 |
+| min, max with more arguments | of equal values, min returns the last and max the first |
+| `-x` | `0 - x`, so `-(0.0)` is 0.0; a minus in front of a number literal is part of it |
+
+Where SQLite converts a value or makes one up, datumujo refuses. The
+cases are in the oracle table of the requirements. A division by zero
+and an overflow are errors, not NULL and not a REAL.
+
+The oracle test writes 6000 random expressions of each type per run.
+It compares every value with SQLite: a REAL by its bits through
+`ieee754_to_blob`, TEXT and BLOB as hex. Only the named differences
+are left out. For `substr` of an empty BLOB, the SQLite text makes up
+for the difference, so these cases are compared too. Six controls run
+other text in SQLite, and the comparison must see each difference.
+
 ## Counters
 
 A counter is a number in the catalog tree, stored with the rows of the

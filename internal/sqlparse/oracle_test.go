@@ -1,29 +1,14 @@
 package sqlparse
 
 import (
-	"bytes"
 	"fmt"
 	"math/rand"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
-)
 
-// sqlite3 returns the path of the sqlite3 program, the test oracle of
-// P-4. In CI a missing oracle fails the test; elsewhere it skips.
-func sqlite3(t *testing.T) string {
-	t.Helper()
-	path, err := exec.LookPath("sqlite3")
-	if err != nil {
-		if os.Getenv("CI") != "" {
-			t.Fatal("sqlite3 not found; CI must have the oracle (P-4)")
-		}
-		t.Skip("sqlite3 not found")
-	}
-	return path
-}
+	"github.com/dyadik-eu/datumujo/internal/sqlitetest"
+)
 
 // randomExpr writes an expression over small integers and NULL, with
 // every operator of the parser, and parentheses only now and then.
@@ -80,7 +65,6 @@ func randomExpr(r *rand.Rand, depth int) string {
 // has parentheses. If this parser groups the operators as SQLite does,
 // both give the same value.
 func TestPrecedenceAgainstSQLite(t *testing.T) {
-	bin := sqlite3(t)
 	r := rand.New(rand.NewSource(16))
 	type pair struct{ src, printed string }
 	var cases []pair
@@ -100,20 +84,12 @@ func TestPrecedenceAgainstSQLite(t *testing.T) {
 	for i, c := range append(cases, controls...) {
 		fmt.Fprintf(&script, "SELECT %d, quote(%s) IS quote(%s), quote(%s), quote(%s);\n", i, c.src, c.printed, c.src, c.printed)
 	}
-	cmd := exec.Command(bin, "-batch", "-separator", "\t", ":memory:")
-	cmd.Stdin = strings.NewReader(script.String())
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil || stderr.Len() > 0 {
-		t.Fatalf("sqlite3: %v\n%s", err, stderr.String())
-	}
+	lines := sqlitetest.Run(t, script.String())
 	seen := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		f := strings.Split(line, "\t")
+	for _, f := range lines {
 		i, err := strconv.Atoi(f[0])
 		if err != nil || len(f) != 4 || i != seen {
-			t.Fatalf("sqlite3 output line %d: %q", seen, line)
+			t.Fatalf("sqlite3 output line %d: %q", seen, f)
 		}
 		seen++
 		same := f[1] == "1"
