@@ -312,6 +312,26 @@ stays valid when rows are added or deleted. A row that exists through the
 whole walk comes exactly once. A row added behind the cursor does not
 come.
 
+## Drop and savepoints
+
+DropTable frees the pages of the table and of each of its indexes, then
+writes the schema without the table. DropIndex does the same for one
+index. The pages go on the free list, and the next allocation takes them.
+The check shows that no page is lost: after a drop, every page is the
+header, free, or in a tree that the schema names.
+
+A savepoint is the state of the write transaction at one point. It holds
+the header, the map of changed pages, the pages freed in it, and the
+schema.
+RollbackTo sets the transaction back to that state, and the transaction
+goes on.
+
+A savepoint copies the map, not the pages. This works because a
+write never changes a page of the map in place; it puts a new one. The
+cost is one copy of the map per savepoint, at most MaxTxBytes divided by
+the page size entries. Stage 2 takes a savepoint before each SQL
+statement, so a failed statement changes nothing (L-7).
+
 ## Counters
 
 A counter is a number in the catalog tree, stored with the rows of the
