@@ -98,7 +98,7 @@ stage 1. The requirements of stage 1 hold for every statement.
 |---|---|
 | L-1 | Statements: CREATE TABLE, CREATE [UNIQUE] INDEX, DROP TABLE, DROP INDEX, ALTER TABLE ADD COLUMN, INSERT, UPDATE, DELETE, SELECT, BEGIN, COMMIT, ROLLBACK. |
 | L-2 | SELECT has expressions with aliases, `*`, WHERE, ORDER BY, LIMIT, OFFSET, DISTINCT, GROUP BY, HAVING, the aggregates count, sum, min, max and avg, INNER JOIN and LEFT JOIN. |
-| L-3 | Types are strict. A column holds values of its type only. SQL does not convert a value to fit, except int64 to float64 in arithmetic and comparison. A value that does not fit is an error. |
+| L-3 | Types are strict. A column holds values of its type only. SQL does not convert a value to fit, except int64 to float64 in arithmetic and comparison, and an INTEGER into a REAL column when float64 holds it exactly. A value that does not fit is an error. |
 | L-4 | NULL follows SQL: a comparison with NULL is unknown, WHERE keeps a row only when the condition is true, and IS NULL tests for it. |
 | L-5 | Values come in as parameters (`?` and `?NNN`). A program never needs to build SQL text from values. |
 | L-6 | An error in the SQL text names the line and column where it is. |
@@ -143,3 +143,7 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | `CAST(x AS TEXT)` for a REAL x | 15 or 17 significant digits | the fewest digits that give x back |
 | `substr` of an empty BLOB | NULL | an empty BLOB |
 | `length` of a text with a NUL character | the characters before the NUL | all characters |
+| NULL in a PRIMARY KEY column that is not INTEGER | allowed, also twice | error: a key column is NOT NULL |
+| `INT PRIMARY KEY` without a value | NULL; only `INTEGER PRIMARY KEY` takes the next key | the next key, for every integer type name |
+| `"Foo"` and `foo` | the same name | two names: a quoted name keeps its case, as in the SQL standard |
+| the rows an UPDATE visits first | in rowid order | in key order; a statement that fails for one order can succeed for the other |

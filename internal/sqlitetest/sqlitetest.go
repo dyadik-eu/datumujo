@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -45,4 +47,44 @@ func Run(t testing.TB, script string) [][]string {
 		}
 	}
 	return lines
+}
+
+var nearLine = regexp.MustCompile(`near line (\d+): (.*)`)
+
+// RunErrors runs script like Run, but a statement may fail. It returns
+// the output lines and the errors by the line of the script they are
+// on. A line on stderr that names no line of the script fails the test.
+func RunErrors(t testing.TB, script string) ([][]string, map[int]string) {
+	t.Helper()
+	cmd := exec.Command(Path(t), "-batch", "-separator", "\t", ":memory:")
+	cmd.Stdin = strings.NewReader(script)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, _ := cmd.Output()
+	errs := map[int]string{}
+	last := -1
+	for _, l := range strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n") {
+		if l == "" {
+			continue
+		}
+		m := nearLine.FindStringSubmatch(l)
+		if m == nil {
+			// Newer versions print the statement and a marker below the
+			// error, indented. They belong to the error before.
+			if last < 0 || !strings.HasPrefix(l, " ") {
+				t.Fatalf("sqlite3: %s", l)
+			}
+			errs[last] += "\n" + l
+			continue
+		}
+		last, _ = strconv.Atoi(m[1])
+		errs[last] = m[2]
+	}
+	var lines [][]string
+	for _, l := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+		if l != "" {
+			lines = append(lines, strings.Split(l, "\t"))
+		}
+	}
+	return lines, errs
 }

@@ -420,6 +420,45 @@ are left out. For `substr` of an empty BLOB, the SQLite text makes up
 for the difference, so these cases are compared too. Six controls run
 other text in SQLite, and the comparison must see each difference.
 
+## Writes in SQL
+
+`Exec` runs CREATE, DROP, ALTER TABLE ADD COLUMN, INSERT, UPDATE and
+DELETE on the tables of stage 1. A SQL table is a table of the engine:
+
+| SQL | Engine |
+|---|---|
+| a column | a column of the same type; NULL allowed unless NOT NULL or in the key |
+| PRIMARY KEY | the key |
+| no PRIMARY KEY | a first column `rowid` of type int64 as the key; `*` and INSERT without a column list do not show it |
+| an index | an index; its name is unique across all tables, as in SQLite |
+
+An INSERT can give no value to the hidden key or to an INTEGER key of
+one column. Then the key is the largest key plus one, or 1 in an empty
+table (L-8).
+The largest key -5 gives -4, as in SQLite. After the largest int64 there
+is no next key, and the INSERT fails.
+
+An UPDATE and a DELETE read every row they change before they write
+one; a write during a scan leaves the scan undefined. Every SET reads
+the old row, so `SET a = b, b = a` swaps. A new key moves the row: the
+old row is deleted and the new one inserted.
+
+Each statement runs after a savepoint (L-7). When it fails, the
+transaction goes back to the savepoint and goes on. This covers a
+statement that goes past MaxTxBytes too. An error of the engine, such as
+ErrUnique, reaches the program through `errors.Is`, and the error names
+the position of the statement.
+
+The oracle test runs 500 random statements over three tables in SQLite
+and here. Each statement must fail in both or in neither. One that
+succeeds must change as many rows. At the end every table must hold the
+same rows with the same values. The workload sets no key column and no
+column of a unique index to an expression. There the order of the rows
+decides the outcome, and SQLite visits them in another order.
+
+The rows that an UPDATE or a DELETE changes are in memory until the
+statement ends. Step 20 bounds this memory (L-10).
+
 ## Counters
 
 A counter is a number in the catalog tree, stored with the rows of the
