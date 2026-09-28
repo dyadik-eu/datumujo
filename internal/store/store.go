@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"sync"
 
@@ -572,6 +573,31 @@ func (t *Tx) Free(no uint64) error {
 	t.dirty[no] = p
 	t.freed[no] = true
 	t.hdr.FreeHead, t.hdr.FreeCount = no, t.hdr.FreeCount+1
+	return nil
+}
+
+// Savepoint is the state of a write transaction at one point. RollbackTo
+// returns the transaction to it.
+type Savepoint struct {
+	hdr   page.Header
+	dirty map[uint64][]byte
+	freed map[uint64]bool
+}
+
+// Savepoint returns the state of the transaction now. It copies the map
+// of changed pages, not the pages. A page of the map is never changed in
+// place; a write puts a new one.
+func (t *Tx) Savepoint() Savepoint {
+	return Savepoint{hdr: t.hdr, dirty: maps.Clone(t.dirty), freed: maps.Clone(t.freed)}
+}
+
+// RollbackTo drops every change after the savepoint sp. The transaction
+// goes on, and sp stays valid for a later RollbackTo.
+func (t *Tx) RollbackTo(sp Savepoint) error {
+	if t.done {
+		return ErrDone
+	}
+	t.hdr, t.dirty, t.freed = sp.hdr, maps.Clone(sp.dirty), maps.Clone(sp.freed)
 	return nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/dyadik-eu/datumujo/internal/btree"
+	"github.com/dyadik-eu/datumujo/internal/store"
 )
 
 // CatalogSlot is the root slot of the catalog tree, which holds the
@@ -28,6 +29,8 @@ type Writer interface {
 	btree.WritePages
 	Root(i int) uint64
 	SetRoot(i int, no uint64) error
+	Savepoint() store.Savepoint
+	RollbackTo(sp store.Savepoint) error
 }
 
 // Errors of reads and writes of rows.
@@ -450,4 +453,77 @@ func (tx *Tx) Delete(table string, key ...any) (bool, error) {
 		}
 	}
 	return btree.Open(t.Root, tx.pageSize).Delete(tx.w, k)
+}
+
+// DropTable removes a table and its indexes and frees their pages. If it
+// fails, pages may be freed already: the caller rolls back.
+func (tx *Tx) DropTable(name string) error {
+	t, err := tx.table(name)
+	if err != nil {
+		return err
+	}
+	for _, ix := range t.Indexes {
+		if err := btree.Open(ix.Root, tx.pageSize).Drop(tx.w); err != nil {
+			return err
+		}
+	}
+	if err := btree.Open(t.Root, tx.pageSize).Drop(tx.w); err != nil {
+		return err
+	}
+	s := tx.copySchema()
+	for i := range s.Tables {
+		if s.Tables[i].Name == name {
+			s.Tables = append(s.Tables[:i:i], s.Tables[i+1:]...)
+			break
+		}
+	}
+	return tx.saveSchema(s)
+}
+
+// DropIndex removes an index of a table and frees its pages. If it fails,
+// pages may be freed already: the caller rolls back.
+func (tx *Tx) DropIndex(table, index string) error {
+	t, err := tx.table(table)
+	if err != nil {
+		return err
+	}
+	ix, ok := t.Index(index)
+	if !ok {
+		return fmt.Errorf("%w: table %s, index %s", ErrNoIndex, table, index)
+	}
+	if err := btree.Open(ix.Root, tx.pageSize).Drop(tx.w); err != nil {
+		return err
+	}
+	s := tx.copySchema()
+	nt, _ := s.Table(table)
+	var kept []Index
+	for _, other := range nt.Indexes {
+		if other.Name != index {
+			kept = append(kept, other)
+		}
+	}
+	nt.Indexes = kept
+	return tx.saveSchema(s)
+}
+
+// Savepoint is the state of a write transaction at one point: its pages
+// and its schema.
+type Savepoint struct {
+	store  store.Savepoint
+	schema *Schema
+}
+
+// Savepoint returns the state of the transaction now.
+func (tx *Tx) Savepoint() Savepoint {
+	return Savepoint{store: tx.w.Savepoint(), schema: tx.schema}
+}
+
+// RollbackTo drops every change after the savepoint sp: rows, indexes,
+// counters and the schema. The transaction goes on, and sp stays valid.
+func (tx *Tx) RollbackTo(sp Savepoint) error {
+	if err := tx.w.RollbackTo(sp.store); err != nil {
+		return err
+	}
+	tx.schema = sp.schema
+	return nil
 }

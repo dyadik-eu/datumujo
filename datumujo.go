@@ -25,6 +25,7 @@ type (
 	Index       = table.Index
 	ScanOptions = table.Options
 	Rows        = table.Rows
+	Savepoint   = table.Savepoint
 	Report      = check.Report
 	Finding     = check.Finding
 	Stats       = check.Stats
