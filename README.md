@@ -24,6 +24,12 @@ requirements are in
 [docs/design.md](docs/design.md), and the steps in
 [docs/roadmap.md](docs/roadmap.md).
 
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) describes how a change gets in.
+Report a security problem or wrong data in private, as
+[SECURITY.md](SECURITY.md) describes.
+
 ## Licence
 
 [EUPL-1.2](LICENSE).

@@ -2,9 +2,9 @@
 # Reject pushes directly to main.
 #
 # Every change goes through a branch and a pull request, so CI runs before
-# anything lands on main. GitHub branch protection would be the right place
-# for this rule, but it is not available for private repositories on this
-# account (the rules API answers 403). So the rule lives here.
+# anything lands on main. Since 2026-09-28, a ruleset on GitHub enforces
+# the same rule. The hook stays: it stops the push before it leaves the
+# machine, and it works where GitHub cannot enforce the rule.
 #
 # Enable once per clone:
 #
