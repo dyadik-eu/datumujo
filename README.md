@@ -22,7 +22,8 @@ The first user is a code forge, and its needs shaped the first stage. The
 requirements are in
 [docs/requirements.md](docs/requirements.md), the design in
 [docs/design.md](docs/design.md), and the steps in
-[docs/roadmap.md](docs/roadmap.md).
+[docs/roadmap.md](docs/roadmap.md). The roadmap also says what v1.0
+promises: a file format and an API that stay.
 
 ## Contributing
 
