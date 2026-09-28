@@ -1,0 +1,21 @@
+name: Feature
+description: Propose something datumujo does not do yet.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you need
+      description: The problem, not the solution. What does a program want to do and cannot?
+    validations:
+      required: true
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements and roadmap
+      description: Which requirement IDs in docs/requirements.md it touches, and whether a roadmap step covers it.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you use now
+      description: How you work around it today.

@@ -1,0 +1,39 @@
+name: Bug
+description: datumujo does something other than its documentation says.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The tag or the commit of datumujo.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Output of `go version` and the operating system.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: A program or commands that show the problem, as short as possible.
+      render: go
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual result
+      description: What you expected, and what happened. Paste the output.
+    validations:
+      required: true
+  - type: textarea
+    id: check
+    attributes:
+      label: Output of the check command
+      description: "`datumujo check FILE` on the database, if a file is involved."
+      render: text
