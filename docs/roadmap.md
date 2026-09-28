@@ -51,3 +51,38 @@ the requirements it names.
 | 25 | Random statements against the oracle; the SQL dialect and its limits in the docs | P-4 |
 
 Stage 2 is tagged as v0.2.0 when step 25 is done.
+
+# Towards v1.0
+
+Decided on 2026-09-28: stable before broad. The release v1.0 promises a
+file format and an API that stay. It has the SQL core and the
+extensions that most programs need. Broader SQL can follow in 1.x releases.
+
+The stages have no dates. A stage is done when a test or a measurement
+in the repository meets each of its criteria, as in stages 1 and 2.
+Each stage gets a roadmap of steps before its work starts.
+
+| Version | Content | Done when |
+|---|---|---|
+| v0.2 | SQL core: steps 14 to 25 above | step 25 is done |
+| v0.3 | SQL for programs: DEFAULT, CHECK, UNIQUE on a column, subqueries in WHERE and in the select list (scalar, IN, EXISTS), INSERT ... ON CONFLICT, EXPLAIN | each form runs against the oracle, and each difference to SQLite is in the oracle table |
+| v0.4 | Speed: statistics for the planner, the order of joins, sorting past the memory bound | a benchmark suite runs from the repository against SQLite, and each release publishes its results |
+| v0.5 | Release candidate for the format | the file format has a specification from which a second reader can be written; the repository holds a file of every release, and each release reads all of them; each fuzz target ran 24 hours; the crash test ran on real disks |
+| v1.0 | The promise | see below |
+
+## What v1.0 promises
+
+- The API follows semantic versioning. A program that builds against
+  v1.0 builds against every 1.x.
+- Every 1.x release reads every file that v1.0 or a later 1.x wrote
+  (I-3). A file with a format that a release does not know is refused,
+  not read in part (I-4).
+- Every limit is documented with its number: sizes, memory bounds, the
+  largest key.
+- The latest 1.x gets security fixes, as SECURITY.md describes.
+
+## After v1.0
+
+Views, foreign keys, window functions, full-text search and replication
+(S-4) are candidates for 1.x releases. None of them may change the file
+format in a way that 1.0 cannot read.
