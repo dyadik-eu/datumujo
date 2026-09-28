@@ -133,3 +133,13 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | `9223372036854775808`, an integer literal past int64 | a REAL | error: write a REAL with a decimal point |
 | `1e999`, a REAL literal past float64 | Inf | error |
 | `VARCHAR(20)` | the length is ignored | error: a type takes no length |
+| `5 / 0`, `5 % 0` | NULL | error: division by zero |
+| an INTEGER result past int64 | a REAL | error: integer overflow |
+| a REAL result past float64 | Inf | error: REAL overflow |
+| `WHERE 1`, `NOT 1` | 1 is true | error: the operator needs BOOLEAN |
+| `1 \|\| 'a'`, `1.5 % 2` | the number becomes text or an integer | error |
+| `CAST('12abc' AS INTEGER)`, `CAST(1e30 AS INTEGER)` | 12, the largest int64 | error: the value does not convert |
+| `CAST(TRUE AS TEXT)` | '1' | 'true' |
+| `CAST(x AS TEXT)` for a REAL x | 15 or 17 significant digits | the fewest digits that give x back |
+| `substr` of an empty BLOB | NULL | an empty BLOB |
+| `length` of a text with a NUL character | the characters before the NUL | all characters |
