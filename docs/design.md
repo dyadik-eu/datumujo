@@ -457,7 +457,7 @@ column of a unique index to an expression. There the order of the rows
 decides the outcome, and SQLite visits them in another order.
 
 The rows that an UPDATE or a DELETE changes are in memory until the
-statement ends. Step 20 bounds this memory (L-10).
+statement ends. The bound of memory counts them; see "Plans and memory".
 
 ## Queries
 
@@ -481,7 +481,8 @@ ORDER BY, then OFFSET and LIMIT. The rules follow SQLite:
 A query without ORDER BY and DISTINCT streams. It reads the next row of
 the table when the program asks for it. An error in a row ends the rows
 with Err, after the rows before it. A query with ORDER BY or DISTINCT
-reads all rows that pass WHERE first. Step 20 bounds this memory (L-10).
+reads all rows that pass WHERE first, unless the plan gives them in the
+order of ORDER BY. See "Plans and memory".
 
 GROUP BY, HAVING, aggregates and JOIN are errors that name the step of
 the roadmap that adds them.
@@ -491,6 +492,66 @@ The oracle test fills the tables with the workload of the writes and
 Where a query orders its rows totally, the rows must come in the same
 order. For this, each ORDER BY ends with the key, and DISTINCT orders by
 all columns. The other queries compare their rows as a multiset.
+
+## Plans and memory
+
+A SELECT, an UPDATE and a DELETE read one table. The plan chooses how
+(L-9): every row, or a part of the key or of an index. A plan only
+narrows the rows. The whole WHERE still runs on every row the scan
+gives. So a plan can make a statement slow, but not wrong.
+
+The plan looks at the terms of WHERE that AND joins. A term counts when
+it compares a column with a value that reads no column: `=`, `<`, `<=`,
+`>`, `>=`, BETWEEN and IN, with the column on either side. For the key
+and for each index, it takes the leading columns that have `=` or IN,
+then a range on the next column. The most `=` columns win, then a
+range.
+
+The key wins a tie: a scan of the key reads each row once, and an index
+reads the entry and then the row. IN on several columns makes at most
+1000 scans.
+
+The values come from the run, so parameters work. A value that no row
+can equal makes no scan: NULL, NaN, or 2.5 for an INTEGER column. A
+REAL bound of an INTEGER column becomes the next whole number inside the
+range: `id <= 4.5` reads to 4.
+
+An INTEGER that REAL does not hold exactly bounds no REAL column. Rounded, it could leave out a row that
+WHERE keeps. A value of a type that does not compare with the column is
+an error of WHERE. The scan then reads the whole key or index, so the
+error comes as it would without a plan.
+
+A scan in the order of ORDER BY needs no sort, and a LIMIT stops it
+early. It must be ascending, or descending over all columns of the key.
+A scan backwards gives rows with equal values in the other order of the
+key. The sort keeps them in the order of the key. IN with more
+than one value, and DISTINCT, make a sort.
+
+`Query.Plan` describes the plan: `SCAN t`, `SEARCH t USING INDEX i
+((g = 3))`, `IN ORDER`, `SORT`. A test shows the plan and the rows read
+for each form. Measured on 28.09.2026 with 100000 rows, at a load of
+about 5:
+
+| Query | Plan | Rows read | Time |
+|---|---|---|---|
+| `id = 54321` | primary key | 1 | 11 µs |
+| the same | scan | 100000 | 40 ms |
+| `g = 7` | index | 100 | 1.3 ms |
+| the same | scan | 100000 | 55 ms |
+| `id BETWEEN 1000 AND 1099` | primary key | 100 | 60 µs |
+| `ORDER BY id DESC LIMIT 10` | primary key in order | 10 | 16 µs |
+| the same | scan and sort | 100000 | 70 ms |
+
+A statement that sorts, drops repeated rows, or changes rows holds rows
+in memory. `Options.QueryMemory` bounds their bytes, 64 MiB by default
+(L-10). A row counts 24 bytes for each value plus the bytes of its text
+and blobs. A statement past the bound fails with ErrQueryMemory. It
+returns no rows and changes nothing. A LIMIT does not bound a sort: the
+sort reads all rows first.
+
+The oracle tests run each random query and each random write twice here:
+with the plan and without. The results must be the same. The query
+test fails if fewer than one in ten of its queries use a SEARCH.
 
 ## Counters
 

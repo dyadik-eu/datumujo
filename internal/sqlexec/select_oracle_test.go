@@ -218,45 +218,60 @@ func selectAgainstSQLite(t *testing.T, seed int64) {
 	for _, s := range stmts {
 		ss.exec(s) // the writes oracle checks these; some fail in both
 	}
-	rowsSeen, ordered := 0, 0
-	for i, x := range qs {
-		st, err := sqlparse.Parse(x.src)
+	// run runs a query here, with the plan or without.
+	run := func(src string, lim Limits) ([]string, string) {
+		st, err := sqlparse.Parse(src)
 		if err != nil {
-			t.Fatalf("%s: %v", x.src, err)
+			t.Fatalf("%s: %v", src, err)
 		}
-		pq, err := Prepare(ss.tx.Schema(), st.(*sqlparse.Select))
+		pq, err := Prepare(ss.tx.Schema(), st.(*sqlparse.Select), lim)
 		if err != nil {
-			t.Fatalf("%s: %v", x.src, err)
+			t.Fatalf("%s: %v", src, err)
 		}
 		rows, err := pq.Run(ss.tx, nil)
 		if err != nil {
-			t.Fatalf("%s: %v", x.src, err)
+			t.Fatalf("%s: %v", src, err)
 		}
-		var ours []string
+		var out []string
 		for rows.Next() {
 			var fields []string
 			for _, v := range rows.Row() {
 				class, value := oracleForm(v)
 				fields = append(fields, class, value)
 			}
-			ours = append(ours, strings.Join(fields, " "))
+			out = append(out, strings.Join(fields, " "))
 		}
 		if err := rows.Err(); err != nil {
-			t.Fatalf("%s: %v", x.src, err)
+			t.Fatalf("%s: %v", src, err)
 		}
+		return out, pq.Plan()
+	}
+	rowsSeen, ordered := 0, 0
+	plans := map[string]int{}
+	for i, x := range qs {
+		ours, plan := run(x.src, Limits{})
+		plain, _ := run(x.src, Limits{NoIndex: true})
+		plans[strings.Fields(plan)[0]]++
 		their := append([]string(nil), theirs[i]...)
 		if !x.ordered {
 			sort.Strings(ours)
+			sort.Strings(plain)
 			sort.Strings(their)
 		} else {
 			ordered++
 		}
 		if strings.Join(ours, "\n") != strings.Join(their, "\n") {
-			t.Errorf("%s\n SQLite:\n  %s\n here:\n  %s", x.src, strings.Join(their, "\n  "), strings.Join(ours, "\n  "))
+			t.Errorf("%s\n plan %s\n SQLite:\n  %s\n here:\n  %s", x.src, plan, strings.Join(their, "\n  "), strings.Join(ours, "\n  "))
+		}
+		if strings.Join(ours, "\n") != strings.Join(plain, "\n") {
+			t.Errorf("%s\n plan %s gives other rows than a full scan", x.src, plan)
 		}
 		rowsSeen += len(ours)
 	}
-	t.Logf("%d queries, %d in total order, %d rows compared", len(qs), ordered, rowsSeen)
+	t.Logf("%d queries, %d in total order, %d rows compared; plans %v", len(qs), ordered, rowsSeen, plans)
+	if plans["SEARCH"] < len(qs)/10 {
+		t.Errorf("only %d of %d queries used a search; the test does not reach the plan", plans["SEARCH"], len(qs))
+	}
 	if rowsSeen < 2000 {
 		t.Errorf("only %d rows compared", rowsSeen)
 	}

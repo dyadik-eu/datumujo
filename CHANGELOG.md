@@ -22,6 +22,10 @@ Stage 2, a core subset of SQL, is in progress. See
 - `DB.Query`, `View.Query` and `Tx.Query` run a SELECT over one table:
   expressions, WHERE, ORDER BY, DISTINCT, LIMIT and OFFSET. The rows are
   `*SQLRows`; close them to end the view of a query of a DB.
+- A statement reads a part of the key or of an index where WHERE allows
+  it. It uses the order of a scan for ORDER BY. `Options.QueryMemory`
+  bounds the rows a statement holds in memory (ErrQueryMemory).
+- `ScanOptions.FromExclusive` and `ScanOptions.ToInclusive` for scans.
 
 ### File format
 

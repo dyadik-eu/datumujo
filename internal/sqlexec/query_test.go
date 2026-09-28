@@ -18,7 +18,7 @@ func (ss *session) query(src string, params ...any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	q, err := Prepare(ss.tx.Schema(), st.(*sqlparse.Select))
+	q, err := Prepare(ss.tx.Schema(), st.(*sqlparse.Select), ss.lim)
 	if err != nil {
 		return "", err
 	}
@@ -108,7 +108,7 @@ func TestSelect(t *testing.T) {
 func TestSelectColumns(t *testing.T) {
 	ss := issues(t)
 	st, _ := sqlparse.Parse("SELECT *, votes + 1, score AS s, ?1 FROM issue")
-	q, err := Prepare(ss.tx.Schema(), st.(*sqlparse.Select))
+	q, err := Prepare(ss.tx.Schema(), st.(*sqlparse.Select), Limits{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestSelectErrors(t *testing.T) {
 func TestSelectStreams(t *testing.T) {
 	ss := issues(t)
 	st, _ := sqlparse.Parse("SELECT id, 10 / (3 - id) FROM issue")
-	q, err := Prepare(ss.tx.Schema(), st.(*sqlparse.Select))
+	q, err := Prepare(ss.tx.Schema(), st.(*sqlparse.Select), Limits{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestSelectCheckedBeforeRun(t *testing.T) {
 	ss := newSession(t, store.Options{})
 	ss.must("CREATE TABLE t (n INTEGER)")
 	st, _ := sqlparse.Parse("SELECT n FROM t WHERE n")
-	if _, err := Prepare(ss.tx.Schema(), st.(*sqlparse.Select)); err == nil || !strings.Contains(err.Error(), "WHERE needs BOOLEAN") {
+	if _, err := Prepare(ss.tx.Schema(), st.(*sqlparse.Select), Limits{}); err == nil || !strings.Contains(err.Error(), "WHERE needs BOOLEAN") {
 		t.Errorf("WHERE n on an empty table: %v", err)
 	}
 }

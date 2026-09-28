@@ -60,6 +60,9 @@ var (
 	ErrReadOnly   = store.ErrReadOnly
 	ErrLocked     = vfs.ErrLocked
 	ErrBackup     = backup.ErrExists
+	// ErrQueryMemory means that a SQL statement would hold more rows in
+	// memory than Options.QueryMemory allows.
+	ErrQueryMemory = sqlexec.ErrMemory
 	// ErrCheckpoint means that a commit is durable and the checkpoint
 	// after it failed. The data is safe; the log grows until a checkpoint
 	// works.
@@ -80,7 +83,15 @@ type Options struct {
 	// log at least this large. 0 means DefaultCheckpointBytes, and a
 	// negative value means never: the program calls Checkpoint.
 	CheckpointBytes int64
+	// QueryMemory bounds the bytes of rows that one SQL statement holds
+	// in memory: to sort them, to drop repeated ones, or to change them.
+	// A statement past it fails with ErrQueryMemory and returns or
+	// changes nothing. 0 means DefaultQueryMemory.
+	QueryMemory int64
 }
+
+// DefaultQueryMemory is the bound of Options.QueryMemory when it is 0.
+const DefaultQueryMemory = sqlexec.DefaultMaxMemory
 
 // DB is an open database. It is safe for use by several goroutines. There
 // is one write transaction at a time; readers never wait for it.
@@ -88,6 +99,7 @@ type DB struct {
 	s              *store.Store
 	fs             vfs.FS
 	checkpointSize int64
+	queryMemory    int64
 	// mu guards closed. A Close waits for no transaction; the caller ends
 	// them first.
 	mu     sync.Mutex
@@ -109,7 +121,7 @@ func open(fs vfs.FS, path string, opt Options) (*DB, error) {
 	if size == 0 {
 		size = DefaultCheckpointBytes
 	}
-	return &DB{s: s, fs: fs, checkpointSize: size}, nil
+	return &DB{s: s, fs: fs, checkpointSize: size, queryMemory: opt.QueryMemory}, nil
 }
 
 // Close closes the database. Transactions and views must be done before.
@@ -129,6 +141,7 @@ func (db *DB) Close() error {
 type View struct {
 	*table.View
 	snap *store.Snapshot
+	lim  sqlexec.Limits
 }
 
 // View starts a reader of the last commit.
@@ -142,8 +155,11 @@ func (db *DB) View() (*View, error) {
 		snap.Close()
 		return nil, err
 	}
-	return &View{View: v, snap: snap}, nil
+	return &View{View: v, snap: snap, lim: db.limits()}, nil
 }
+
+// limits are the bounds of a SQL statement.
+func (db *DB) limits() sqlexec.Limits { return sqlexec.Limits{MaxMemory: db.queryMemory} }
 
 // Close ends the view. A second Close does nothing.
 func (v *View) Close() { v.snap.Close() }
@@ -275,7 +291,7 @@ func (tx *Tx) Exec(query string, params ...any) (Result, error) {
 	}
 	var total Result
 	for _, st := range sts {
-		r, err := sqlexec.Exec(tx.Tx, st, ps)
+		r, err := sqlexec.Exec(tx.Tx, st, ps, tx.db.limits())
 		if err != nil {
 			return total, err
 		}
@@ -304,7 +320,7 @@ func (r *SQLRows) Close() {
 }
 
 // query parses one SELECT and runs it on src.
-func query(src sqlexec.Source, q string, params []any) (*sqlexec.Rows, error) {
+func query(src sqlexec.Source, lim sqlexec.Limits, q string, params []any) (*sqlexec.Rows, error) {
 	st, err := sqlparse.Parse(q)
 	if err != nil {
 		return nil, err
@@ -317,7 +333,7 @@ func query(src sqlexec.Source, q string, params []any) (*sqlexec.Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	pq, err := sqlexec.Prepare(src.Schema(), sel)
+	pq, err := sqlexec.Prepare(src.Schema(), sel, lim)
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +342,7 @@ func query(src sqlexec.Source, q string, params []any) (*sqlexec.Rows, error) {
 
 // Query runs one SELECT on the view.
 func (v *View) Query(q string, params ...any) (*SQLRows, error) {
-	rows, err := query(v.View, q, params)
+	rows, err := query(v.View, v.lim, q, params)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +352,7 @@ func (v *View) Query(q string, params ...any) (*SQLRows, error) {
 // Query runs one SELECT in the transaction. It sees the changes of the
 // transaction. A write while the rows are open leaves them undefined.
 func (tx *Tx) Query(q string, params ...any) (*SQLRows, error) {
-	rows, err := query(tx.Tx, q, params)
+	rows, err := query(tx.Tx, tx.db.limits(), q, params)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +366,7 @@ func (db *DB) Query(q string, params ...any) (*SQLRows, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := query(v.View, q, params)
+	rows, err := query(v.View, v.lim, q, params)
 	if err != nil {
 		v.Close()
 		return nil, err

@@ -20,6 +20,7 @@ type Result struct {
 	// LastInsertID is the key of the last row an INSERT wrote, if the
 	// table has an INTEGER key of one column or a hidden key. Else 0.
 	LastInsertID int64
+	scanned      int64 // rows an UPDATE or DELETE read, for the tests
 }
 
 // ErrStatement matches a statement that Exec does not run: SELECT,
@@ -30,7 +31,7 @@ var ErrStatement = errors.New("sqlexec: statement not supported here")
 // Exec runs a statement that writes, in tx. A statement that fails
 // changes nothing, and tx can go on (L-7): Exec rolls tx back to a
 // savepoint taken before the statement. params[0] is ?1.
-func Exec(tx *table.Tx, st sqlparse.Statement, params []any) (Result, error) {
+func Exec(tx *table.Tx, st sqlparse.Statement, params []any, lim Limits) (Result, error) {
 	switch st.(type) {
 	case *sqlparse.Select:
 		return Result{}, wrap(st.Pos(), ErrStatement, "SELECT returns rows; run it with Query")
@@ -38,7 +39,7 @@ func Exec(tx *table.Tx, st sqlparse.Statement, params []any) (Result, error) {
 		return Result{}, wrap(st.Pos(), ErrStatement, "%s: begin, commit and roll back a transaction with its methods", st)
 	}
 	sp := tx.Savepoint()
-	r, err := run(tx, st, params)
+	r, err := run(tx, st, params, lim)
 	if err != nil {
 		if rb := tx.RollbackTo(sp); rb != nil {
 			return Result{}, errors.Join(err, rb)
@@ -73,7 +74,7 @@ func engineErr(at sqlparse.At, err error) error {
 	return &sqlparse.Error{At: at, Msg: msg, Err: err}
 }
 
-func run(tx *table.Tx, st sqlparse.Statement, params []any) (Result, error) {
+func run(tx *table.Tx, st sqlparse.Statement, params []any, lim Limits) (Result, error) {
 	switch s := st.(type) {
 	case *sqlparse.CreateTable:
 		return Result{}, createTable(tx, s)
@@ -88,9 +89,9 @@ func run(tx *table.Tx, st sqlparse.Statement, params []any) (Result, error) {
 	case *sqlparse.Insert:
 		return insert(tx, s, params)
 	case *sqlparse.Update:
-		return update(tx, s, params)
+		return update(tx, s, params, lim)
 	case *sqlparse.Delete:
-		return deleteRows(tx, s, params)
+		return deleteRows(tx, s, params, lim)
 	}
 	return Result{}, wrap(st.Pos(), ErrStatement, "%s", st)
 }
@@ -418,24 +419,38 @@ func keeps(w *Expr, e sqlparse.Expr, row, params []any) (bool, error) {
 
 // matching reads the rows of a table that WHERE keeps. It reads all of
 // them before the statement writes one: a write during a scan leaves the
-// scan undefined.
-func matching(tx *table.Tx, t *table.Table, w *Expr, e sqlparse.Expr, at sqlparse.At, params []any) ([][]any, error) {
-	rows, err := tx.Scan(t.Name, table.Options{})
-	if err != nil {
-		return nil, engineErr(at, err)
+// scan undefined. The plan narrows the rows it reads, and the bound of
+// memory counts the rows it keeps.
+func matching(tx *table.Tx, t *table.Table, w *Expr, e sqlparse.Expr, at sqlparse.At, params []any, lim Limits, scanned *int64) ([][]any, error) {
+	var a *access
+	if !lim.NoIndex {
+		a = choose(t, constraints(e, tableScope{t}))
 	}
+	read, err := readRows(tx, t, a, params, at, scanned)
+	if err != nil {
+		return nil, err
+	}
+	mem := memory{max: lim.maxMemory(), at: at}
 	var out [][]any
-	for rows.Next() {
-		row := rows.Row()
-		ok, err := keeps(w, e, row, params)
+	for {
+		row, ok, err := read()
 		if err != nil {
 			return nil, err
 		}
-		if ok {
+		if !ok {
+			return out, nil
+		}
+		keep, err := keeps(w, e, row, params)
+		if err != nil {
+			return nil, err
+		}
+		if keep {
+			if err := mem.add(row); err != nil {
+				return nil, err
+			}
 			out = append(out, row)
 		}
 	}
-	return out, engineErr(at, rows.Err())
 }
 
 func keyOf(t *table.Table, row []any) []any {
@@ -456,7 +471,7 @@ func sameKey(t *table.Table, a, b []any) bool {
 	return true
 }
 
-func update(tx *table.Tx, s *sqlparse.Update, params []any) (Result, error) {
+func update(tx *table.Tx, s *sqlparse.Update, params []any, lim Limits) (Result, error) {
 	t, err := findTable(tx, s.At, s.Table)
 	if err != nil {
 		return Result{}, err
@@ -483,7 +498,8 @@ func update(tx *table.Tx, s *sqlparse.Update, params []any) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	old, err := matching(tx, t, w, s.Where, s.At, params)
+	var scanned int64
+	old, err := matching(tx, t, w, s.Where, s.At, params, lim, &scanned)
 	if err != nil {
 		return Result{}, err
 	}
@@ -511,10 +527,10 @@ func update(tx *table.Tx, s *sqlparse.Update, params []any) (Result, error) {
 			return Result{}, engineErr(s.At, err)
 		}
 	}
-	return Result{RowsAffected: int64(len(old))}, nil
+	return Result{RowsAffected: int64(len(old)), scanned: scanned}, nil
 }
 
-func deleteRows(tx *table.Tx, s *sqlparse.Delete, params []any) (Result, error) {
+func deleteRows(tx *table.Tx, s *sqlparse.Delete, params []any, lim Limits) (Result, error) {
 	t, err := findTable(tx, s.At, s.Table)
 	if err != nil {
 		return Result{}, err
@@ -523,7 +539,8 @@ func deleteRows(tx *table.Tx, s *sqlparse.Delete, params []any) (Result, error) 
 	if err != nil {
 		return Result{}, err
 	}
-	rows, err := matching(tx, t, w, s.Where, s.At, params)
+	var scanned int64
+	rows, err := matching(tx, t, w, s.Where, s.At, params, lim, &scanned)
 	if err != nil {
 		return Result{}, err
 	}
@@ -532,7 +549,7 @@ func deleteRows(tx *table.Tx, s *sqlparse.Delete, params []any) (Result, error) 
 			return Result{}, engineErr(s.At, err)
 		}
 	}
-	return Result{RowsAffected: int64(len(rows))}, nil
+	return Result{RowsAffected: int64(len(rows)), scanned: scanned}, nil
 }
 
 // Params turns the Go values of a program into values of SQL: the
