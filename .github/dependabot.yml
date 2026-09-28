@@ -1,0 +1,8 @@
+# The Go module has no dependencies (S-2). The workflows use actions, and
+# those get updates.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
