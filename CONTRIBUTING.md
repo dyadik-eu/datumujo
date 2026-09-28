@@ -29,7 +29,9 @@ go vet ./...
 go test -race ./...
 ```
 
-`gofmt -l .` must print nothing.
+`gofmt -l .` must print nothing. The tests of the SQL layer need the
+`sqlite3` program on `PATH`, as the test oracle (P-4). In CI, a test that
+needs it and does not find it fails; elsewhere it skips.
 
 ## Where work comes from
 
