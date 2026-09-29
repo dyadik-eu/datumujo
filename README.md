@@ -68,7 +68,8 @@ datumujo sql forge.db "SELECT id, title FROM issue WHERE state = 'open'"
 ```
 
 The typed Go API of stage 1 and the SQL of stage 2 work on the same
-file. The SQL, and each difference to SQLite, is in
+file. The SQL and its limits are in [docs/sql.md](docs/sql.md), and
+each difference to SQLite is in
 [docs/requirements.md](docs/requirements.md).
 
 ## Goals
