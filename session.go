@@ -162,3 +162,66 @@ func (s *Session) Query(q string, params ...any) (*SQLRows, error) {
 	}
 	return s.db.Query(q, params...)
 }
+
+// Script runs the statements of the text in order, as Exec does, and
+// SELECT too. For a SELECT, it calls fn with its rows and closes them
+// after; the rows are valid only in the call. An error, of a statement
+// or of fn, stops the script. Errors in the text name the line and
+// column in the whole text.
+func (s *Session) Script(text string, fn func(*SQLRows) error, params ...any) (Result, error) {
+	sts, err := sqlparse.ParseAll(text)
+	if err != nil {
+		return Result{}, err
+	}
+	ps, err := sqlexec.Params(params)
+	if err != nil {
+		return Result{}, err
+	}
+	var total Result
+	for _, st := range sts {
+		if sel, ok := st.(*sqlparse.Select); ok {
+			if err := s.query(sel, ps, fn); err != nil {
+				return total, err
+			}
+			continue
+		}
+		r, err := s.exec(st, ps)
+		if err != nil {
+			return total, err
+		}
+		total.RowsAffected += r.RowsAffected
+		if _, ok := st.(*sqlparse.Insert); ok {
+			total.LastInsertID = r.LastInsertID
+		}
+	}
+	return total, nil
+}
+
+// query runs a parsed SELECT in the state of the session and hands its
+// rows to fn.
+func (s *Session) query(sel *sqlparse.Select, ps []any, fn func(*SQLRows) error) error {
+	var rows *sqlexec.Rows
+	var err error
+	switch {
+	case s.tx != nil:
+		rows, err = runSelect(s.tx.Tx, s.db.limits(), sel, ps)
+	case s.view != nil:
+		rows, err = runSelect(s.view.View, s.db.limits(), sel, ps)
+	default:
+		var v *View
+		if v, err = s.db.View(); err != nil {
+			return err
+		}
+		defer v.Close()
+		rows, err = runSelect(v.View, s.db.limits(), sel, ps)
+	}
+	if err != nil {
+		return err
+	}
+	if err := fn(&SQLRows{Rows: rows}); err != nil {
+		return err
+	}
+	// An error in a row ends the rows. fn may not have asked for it; it
+	// must not get lost.
+	return rows.Err()
+}

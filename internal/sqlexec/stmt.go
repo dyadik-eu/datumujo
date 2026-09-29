@@ -64,13 +64,9 @@ func engineErr(at sqlparse.At, err error) error {
 	if errors.As(err, &pe) {
 		return err
 	}
-	msg := err.Error()
-	switch {
-	case errors.Is(err, table.ErrExists):
-		msg = "a row with this primary key exists: " + msg
-	case errors.Is(err, table.ErrUnique):
-		msg = "UNIQUE: " + msg
-	}
+	// The message of the table layer says what happened; its prefix
+	// names the layer, which the position here replaces.
+	msg := strings.TrimPrefix(err.Error(), "table: ")
 	return &sqlparse.Error{At: at, Msg: msg, Err: err}
 }
 
