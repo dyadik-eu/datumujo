@@ -149,6 +149,13 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | the rows an UPDATE visits first | in rowid order | in key order; a statement that fails for one order can succeed for the other |
 | the name of a result column without an alias | the text as written: `1+1` | the expression as printed: `(1 + 1)` |
 | NaN in ORDER BY | NaN is stored as NULL | NaN sorts after NULL and before every other value |
+| -0.0 in a REAL column | stored as 0.0 | keeps its sign; a key stores it as 0.0 |
+| DEFAULT on an `INTEGER PRIMARY KEY` | ignored: the column takes the next key | error when the table is made |
+| `NOT NULL DEFAULT NULL` | the table is made; an INSERT without the column fails | error when the table is made |
+| a DEFAULT of another type than its column | stored as written | error when the table is made |
+| `DEFAULT (expr)` | allowed in CREATE TABLE | error: a constant or CURRENT_TIMESTAMP |
+| `DEFAULT CURRENT_TIMESTAMP` | TEXT to the second | a TIMESTAMP to the nanosecond, in UTC, and only for a TIMESTAMP column; not in oracle tests |
+| `INSERT ... DEFAULT VALUES` | the defaults of all columns | not in the SQL |
 | a column neither in GROUP BY nor in an aggregate | the value of some row of the group | error |
 | `sum` or `avg` of TEXT or BOOLEAN | the values as numbers: 'a' is 0, TRUE is 1 | error: they need INTEGER or REAL |
 | `sum` of REAL past float64 | Inf | error: REAL overflow |

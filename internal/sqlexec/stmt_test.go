@@ -287,7 +287,7 @@ func TestStatementErrors(t *testing.T) {
 		{"CREATE INDEX x ON t (nosuch)", nil, 1, 1, "does not exist", table.ErrSchema},
 		{"DROP TABLE nosuch", nil, 1, 1, "no such table", table.ErrNoTable},
 		{"DROP INDEX nosuch", nil, 1, 1, "no such index", table.ErrNoIndex},
-		{"ALTER TABLE t ADD COLUMN x INTEGER NOT NULL", nil, 1, 26, "must allow NULL", nil},
+		{"ALTER TABLE t ADD COLUMN x INTEGER NOT NULL", nil, 1, 26, "an added column NOT NULL needs a DEFAULT", nil},
 		{"ALTER TABLE t ADD COLUMN name TEXT", nil, 1, 1, "column name twice", table.ErrSchema},
 		{"INSERT INTO nosuch VALUES (1)", nil, 1, 1, "no such table", table.ErrNoTable},
 		{"INSERT INTO t VALUES (1, 'a')", nil, 1, 23, "2 values for 4 columns", nil},

@@ -275,13 +275,13 @@ accepts encodes to the same bytes.
 
 ## Format versions
 
-Format version 1 is the file of v0.1.0 and v0.2.0. Version 2 adds two
-things to the schema: the text of a default for each column, and the
-texts of the checks of each table. That is schema format 3. The pages,
-the log, the keys and the rows are the same in both versions.
+Format version 1 is the file of v0.1.0 and v0.2.0. Version 2 adds to the
+schema a default and a fill for each column, and the checks of each
+table. That is schema format 3. The
+pages, the log, the keys and the rows are the same in both versions.
 
 This code reads both (I-3). A new file has version 1. The commit that
-writes the first default or check raises the file to version 2
+writes the first default, fill or check raises the file to version 2
 (requirement L-19). So a program that uses only what v0.2.0 knows keeps
 files that the old release reads. A file of version 2 gets the error for
 an unknown version from v0.2.0, before it reads a page past the header
@@ -289,16 +289,59 @@ an unknown version from v0.2.0, before it reads a page past the header
 
 The rules hold in both directions:
 
-* A schema without a default or a check is written in schema format 2,
-  the format of v0.2.0. A schema with one is written in format 3.
+* A schema without a default, a fill or a check is written in schema
+  format 2, the format of v0.2.0. A schema with one is written in
+  format 3.
 * A file of version 1 with a schema of format 3 is damaged. So is a
-  schema of format 3 without a default or a check: that is not what the
-  encoder writes.
+  schema of format 3 without a default, a fill or a check: that is not
+  what the encoder writes.
 * A version is never lowered. When the last default or check is dropped,
   the file stays at version 2.
 
-This package stores the texts and does not read them. The SQL layer
-parses them (L-13, L-14).
+The table layer stores the texts and does not read them. The SQL layer
+parses them (L-13, L-14). A fill is a value; the next section says what
+reads it.
+
+## Defaults and fills
+
+The schema keeps the DEFAULT of a column as text, the way
+`sqlparse.Default` prints it: `-3`, `'a''b'`, `X'00ff'`, `TRUE`,
+`CURRENT_TIMESTAMP`. An INSERT parses the text for each column it does not
+name. It fits the value to the column as it fits a value of the
+statement. CURRENT_TIMESTAMP is read once per statement, in UTC, so all
+rows of one INSERT get the same time.
+
+A column that ALTER TABLE adds has a fill as well: the value of its
+default, stored as a value. A row written before the column ends before
+it, and the table layer gives such a row the fill instead of null. So
+adding a column still rewrites no row, and the column can be NOT NULL.
+The text of the default stays next to it for the INSERTs after.
+
+A default is checked when the table or column is made, not when a row
+is written. It must fit the type of its column; an INTEGER fits a REAL
+column when a REAL holds it exactly. DEFAULT NULL on a column that
+allows NULL is the same as no default and stores nothing, so the file
+stays at version 1.
+
+### Rejected: parse the default in the table layer
+
+The table layer could read the text of a default and fill old rows from
+it. It would need the SQL parser and the rules that fit a value to a
+column. And it would evaluate text on every read of an old row. A fill
+is the value, fixed when the column is added.
+
+### Rejected: rewrite the rows that exist
+
+ALTER TABLE could write the default into every row. It costs a write of
+the whole table. And the transaction limit (`Options.MaxTxBytes`) would
+bound the size of a table that can take a new column. A fill costs a
+few bytes in the schema.
+
+### Rejected: an expression as a default
+
+SQLite takes `DEFAULT (expr)` in CREATE TABLE and refuses it in ALTER
+TABLE. L-13 names constants and CURRENT_TIMESTAMP. A constant is checked
+against its column once; an expression could fail on a later INSERT.
 
 ### Rejected: lower the version again
 

@@ -1,8 +1,8 @@
 # The SQL of datumujo
 
-This is the SQL of stage 2: what it has, how its values behave, and its
-limits. The requirements are L-1 to L-12 in
-[requirements.md](requirements.md). Each difference to SQLite is in the
+This is the SQL of stage 2 and of the parts of stage 3 that are done.
+It says what the SQL has, how its values behave, and its limits. The requirements are
+L-1 to L-12, and L-13 for DEFAULT, in [requirements.md](requirements.md). Each difference to SQLite is in the
 oracle table there. How the parts work is in [design.md](design.md).
 
 ## Where SQL runs
@@ -22,11 +22,11 @@ An error is a `*SQLError` with the line and the column in the text.
 ## Statements
 
 ```sql
-CREATE TABLE [IF NOT EXISTS] t (c TYPE [NOT NULL] [PRIMARY KEY], ..., [PRIMARY KEY (c, ...)])
+CREATE TABLE [IF NOT EXISTS] t (c TYPE [NOT NULL] [PRIMARY KEY] [DEFAULT d], ..., [PRIMARY KEY (c, ...)])
 CREATE [UNIQUE] INDEX [IF NOT EXISTS] i ON t (c, ...)
 DROP TABLE [IF EXISTS] t
 DROP INDEX [IF EXISTS] i
-ALTER TABLE t ADD [COLUMN] c TYPE
+ALTER TABLE t ADD [COLUMN] c TYPE [NOT NULL] [DEFAULT d]
 INSERT INTO t [(c, ...)] VALUES (e, ...), ...
 UPDATE t SET c = e, ... [WHERE e]
 DELETE FROM t [WHERE e]
@@ -48,7 +48,33 @@ does not show it, but `rowid` names it. An INSERT without a value for
 it, or for an INTEGER key of one column, takes the largest key plus
 one. A column of the key is NOT NULL.
 
-An added column allows NULL: the rows that exist have no value for it.
+## Defaults
+
+`d` is a constant: a number with an optional sign, a string, a blob,
+TRUE, FALSE or NULL. A TIMESTAMP column can take `CURRENT_TIMESTAMP`
+too. An INSERT that does not name a column gives it its default, and
+NULL without one. A column it names keeps the value, NULL included.
+
+```sql
+CREATE TABLE issue (
+  id INTEGER PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'open',
+  opened TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+```
+
+A default must fit its column, and the table is not made if it does
+not. The INTEGER key of one column takes the next key and cannot have a
+default. A NOT NULL column cannot have DEFAULT NULL. CURRENT_TIMESTAMP is
+the time of the statement in UTC, the same for each of its rows.
+
+A column that ALTER TABLE adds gives the rows that exist its default,
+and NULL without one. With a default it can be NOT NULL; without one it
+must allow NULL. Its default is a constant, not CURRENT_TIMESTAMP. The
+rows are not rewritten.
+
+The first default makes the file format version 2, which v0.2.0 does
+not open.
 
 ## Types
 
@@ -159,6 +185,6 @@ byte more in an index.
 ## Not in stage 2
 
 Subqueries, common table expressions, views, triggers, foreign keys,
-CHECK, DEFAULT, window functions, UNION, NATURAL and USING joins, and
-upsert. The roadmap to v1.0 in [roadmap.md](roadmap.md) says which of
+CHECK, window functions, UNION, NATURAL and USING joins, upsert, a
+DEFAULT that is an expression, and `INSERT ... DEFAULT VALUES`. The roadmap to v1.0 in [roadmap.md](roadmap.md) says which of
 them come when.

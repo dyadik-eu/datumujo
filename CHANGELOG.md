@@ -8,16 +8,23 @@ the API and the file format can change in any release.
 
 ### Added
 
+- DEFAULT on a column in SQL: a constant, or CURRENT_TIMESTAMP for a
+  TIMESTAMP column. An INSERT that does not name a column takes it.
+  ALTER TABLE ADD COLUMN with a DEFAULT gives it to the rows that exist,
+  so the column can be NOT NULL. See "Defaults" in
+  [docs/sql.md](docs/sql.md).
 - `Column.Default` and `Def.Checks`, with `Table.Checks`: the schema
   holds the text of a default for each column and the texts of the
-  checks of a table. This release stores them; no layer applies them
-  yet.
+  checks of a table. The Go API stores them and does not apply them; an
+  SQL INSERT applies the default.
+- `Column.Fill`: the value that rows written before `AddColumn` read for
+  the column. With a Fill, an added column can be NOT NULL.
 - `datumujo check` and `Stats.FormatVersion` report the format version.
 
 ### File format
 
 Format version 2. The file becomes version 2 with the commit of its
-first default or check, and stays at version 2. A file without them
+first default, fill or check, and stays at version 2. A file without them
 stays at version 1, which v0.2.0 reads. A file of version 2 gets the
 error "format version 2 is not supported" from v0.2.0. This release reads
 files of versions 1 and 2. See "Format versions" in
