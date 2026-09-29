@@ -75,3 +75,11 @@ jobs:
             echo "tests/fuzz.test.sh passes a script that checks nothing" >&2
             exit 1
           fi
+
+      # The release v0.2.0 against the files of requirement L-19: it reads
+      # a file without defaults and checks, and refuses one with them. The
+      # checkout holds no tags, so the step fetches the one it builds.
+      - name: format of v0.2.0
+        run: |
+          git fetch --depth=1 origin tag v0.2.0
+          tests/format.test.sh
