@@ -128,8 +128,8 @@ func TestFileOfV020(t *testing.T) {
 	}
 }
 
-// writeV2 writes a file with a default and a check through the Go API.
-// SQL has no DEFAULT and no CHECK yet.
+// writeV2 writes a file through the Go API. It has a default, a check,
+// and an added column with a fill. v0.2.0 would read the fill as NULL.
 func writeV2(t *testing.T, path string) {
 	t.Helper()
 	db, err := datumujo.Open(path, datumujo.Options{})
@@ -148,7 +148,10 @@ func writeV2(t *testing.T, path string) {
 		}); err != nil {
 			return err
 		}
-		return tx.Insert("item", datumujo.Row{int64(1), "open"})
+		if err := tx.Insert("item", datumujo.Row{int64(1), "open"}); err != nil {
+			return err
+		}
+		return tx.AddColumn("item", datumujo.Column{Name: "votes", Type: datumujo.Int64, Default: "0", Fill: int64(0)})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -203,7 +206,7 @@ func TestFileOfV2(t *testing.T) {
 	if err != nil || tb == nil || tb.Columns[1].Default != "'open'" || len(tb.Checks) != 1 || tb.Checks[0] != "id > 0" {
 		t.Fatalf("the table after a reopen: %+v, %v", tb, err)
 	}
-	if got := rowsText(t, db, "SELECT * FROM item"); got != "1 open" {
+	if got := rowsText(t, db, "SELECT * FROM item"); got != "1 open 0" {
 		t.Errorf("rows: %s", got)
 	}
 }

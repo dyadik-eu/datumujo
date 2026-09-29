@@ -223,14 +223,12 @@ func (tx *Tx) CreateTable(d Def) error {
 	return tx.saveSchema(s)
 }
 
-// AddColumn adds a column at the end of a table. It must allow null and
-// have no default: the rows written before read it as null.
+// AddColumn adds a column at the end of a table. The rows written before
+// read its Fill, or null without one. So it must allow null or have a
+// Fill. No row is rewritten.
 func (tx *Tx) AddColumn(table string, c Column) error {
-	if !c.Null {
-		return schemaErr("table %s: added column %s must allow null", table, c.Name)
-	}
-	if c.Default != "" {
-		return schemaErr("table %s: added column %s has a default", table, c.Name)
+	if !c.Null && c.Fill == nil {
+		return schemaErr("table %s: added column %s must allow null or have a fill", table, c.Name)
 	}
 	if _, err := tx.table(table); err != nil {
 		return err
