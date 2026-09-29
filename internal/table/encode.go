@@ -245,28 +245,34 @@ func encodeValues(t *Table, row Row) []byte {
 	}
 	b = append(b, nulls...)
 	for _, c := range cols {
-		switch v := row[c].(type) {
-		case nil:
-		case int64:
-			b = binary.AppendVarint(b, v)
-		case float64:
-			b = binary.BigEndian.AppendUint64(b, math.Float64bits(v))
-		case bool:
-			if v {
-				b = append(b, 1)
-			} else {
-				b = append(b, 0)
-			}
-		case string:
-			b = binary.AppendUvarint(b, uint64(len(v)))
-			b = append(b, v...)
-		case []byte:
-			b = binary.AppendUvarint(b, uint64(len(v)))
-			b = append(b, v...)
-		case time.Time:
-			b = binary.AppendVarint(b, v.Unix())
-			b = binary.AppendUvarint(b, uint64(v.Nanosecond()))
+		b = appendValue(b, row[c])
+	}
+	return b
+}
+
+// appendValue appends the form of a value outside the key. A null
+// appends nothing; the bitmap of the row marks it.
+func appendValue(b []byte, v any) []byte {
+	switch v := v.(type) {
+	case int64:
+		b = binary.AppendVarint(b, v)
+	case float64:
+		b = binary.BigEndian.AppendUint64(b, math.Float64bits(v))
+	case bool:
+		if v {
+			b = append(b, 1)
+		} else {
+			b = append(b, 0)
 		}
+	case string:
+		b = binary.AppendUvarint(b, uint64(len(v)))
+		b = append(b, v...)
+	case []byte:
+		b = binary.AppendUvarint(b, uint64(len(v)))
+		b = append(b, v...)
+	case time.Time:
+		b = binary.AppendVarint(b, v.Unix())
+		b = binary.AppendUvarint(b, uint64(v.Nanosecond()))
 	}
 	return b
 }
@@ -290,43 +296,68 @@ func decodeValues(t *Table, b []byte, row Row) error {
 	}
 	for i, c := range cols {
 		col := t.Columns[c]
-		if uint64(i) >= n || nulls[i/8]&(1<<(i%8)) != 0 {
+		// A row written before its column was added ends before it. It
+		// reads the fill of the column, which is null if it has none.
+		if uint64(i) >= n {
+			if col.Fill == nil && !col.Null {
+				return d.fail("column %s is null and does not allow null", col.Name)
+			}
+			row[c] = cloneFill(col.Fill)
+			continue
+		}
+		if nulls[i/8]&(1<<(i%8)) != 0 {
 			if !col.Null {
 				return d.fail("column %s is null and does not allow null", col.Name)
 			}
 			row[c] = nil
 			continue
 		}
-		switch col.Type {
-		case Int64:
-			row[c] = d.varint()
-		case Float64:
-			row[c] = math.Float64frombits(d.uint64())
-		case Bool:
-			switch d.byte() {
-			case 0:
-				row[c] = false
-			case 1:
-				row[c] = true
-			default:
-				d.fail("column %s: bool is not 0 or 1", col.Name)
-			}
-		case String:
-			s := d.take(d.uvarint())
-			if d.err == nil && !utf8.Valid(s) {
-				d.fail("column %s: a string that is not UTF-8", col.Name)
-			}
-			row[c] = string(s)
-		case Bytes:
-			row[c] = bytes.Clone(d.take(d.uvarint()))
-		case Time:
-			row[c] = d.time(d.varint(), d.uvarint())
-		}
+		row[c] = d.value(col)
 		if d.err != nil {
 			return d.err
 		}
 	}
 	return d.end()
+}
+
+// cloneFill returns the fill of a column for a row. A []byte is copied,
+// so that a caller who changes the row does not change the schema.
+func cloneFill(v any) any {
+	if b, ok := v.([]byte); ok {
+		return bytes.Clone(b)
+	}
+	return v
+}
+
+// value reads a value of column col that is not null, in the form of
+// appendValue.
+func (d *decoder) value(col Column) any {
+	switch col.Type {
+	case Int64:
+		return d.varint()
+	case Float64:
+		return math.Float64frombits(d.uint64())
+	case Bool:
+		switch d.byte() {
+		case 0:
+			return false
+		case 1:
+			return true
+		default:
+			d.fail("column %s: bool is not 0 or 1", col.Name)
+		}
+	case String:
+		s := d.take(d.uvarint())
+		if d.err == nil && !utf8.Valid(s) {
+			d.fail("column %s: a string that is not UTF-8", col.Name)
+		}
+		return string(s)
+	case Bytes:
+		return bytes.Clone(d.take(d.uvarint()))
+	case Time:
+		return d.time(d.varint(), d.uvarint())
+	}
+	return nil
 }
 
 // decoder reads stored content and keeps the first fault. After a fault,

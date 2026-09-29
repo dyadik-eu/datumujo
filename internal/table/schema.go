@@ -38,11 +38,16 @@ func (t Type) String() string {
 // Default is the text of its default, "" for none. This package keeps
 // the text and does not read it; the layer that writes it gives it
 // meaning.
+//
+// Fill is the value that a row written before the column was added
+// reads for it, nil for null. Only AddColumn sets it. A column with a
+// Fill can be NOT NULL.
 type Column struct {
 	Name    string
 	Type    Type
 	Null    bool
 	Default string
+	Fill    any
 }
 
 // Def defines a table: its name, its columns in order, the names of
@@ -154,6 +159,11 @@ func (t *Table) check() error {
 		if !utf8.ValidString(c.Default) {
 			return schemaErr("table %s: the default of column %s is not UTF-8", t.Name, c.Name)
 		}
+		if c.Fill != nil {
+			if err := checkValue(t, c, c.Fill, false); err != nil {
+				return schemaErr("table %s: the fill of column %s: %v", t.Name, c.Name, err)
+			}
+		}
 	}
 	for i, c := range t.Checks {
 		if c == "" || !utf8.ValidString(c) {
@@ -174,6 +184,9 @@ func (t *Table) check() error {
 		inKey[k] = true
 		if t.Columns[k].Null {
 			return schemaErr("table %s: key column %s allows null", t.Name, t.Columns[k].Name)
+		}
+		if t.Columns[k].Fill != nil {
+			return schemaErr("table %s: key column %s has a fill; a key column is never added", t.Name, t.Columns[k].Name)
 		}
 	}
 	if len(t.Indexes) > MaxIndexes {
@@ -230,6 +243,11 @@ func fromDef(d Def) (Table, error) {
 	if t.Key, err = t.columnNumbers("key", d.Key); err != nil {
 		return Table{}, err
 	}
+	for _, c := range t.Columns {
+		if c.Fill != nil {
+			return Table{}, schemaErr("table %s: column %s has a fill; only an added column has one", t.Name, c.Name)
+		}
+	}
 	return t, t.check()
 }
 
@@ -251,26 +269,27 @@ func (t *Table) values() []int {
 
 // The first byte of an encoded schema is its format. Format 1 had no
 // indexes; no release wrote it, and this code does not read it. Format 2
-// is the schema of v0.1.0 and v0.2.0. Format 3 adds a default to each
-// column and checks to each table.
+// is the schema of v0.1.0 and v0.2.0. Format 3 adds a default and a fill
+// to each column and checks to each table.
 //
-// A schema without a default or a check is written in format 2, so
-// v0.2.0 reads it. A schema with one is written in format 3, and only a
-// file of format version 2 holds it (requirement L-19).
+// A schema without a default, a fill or a check is written in format 2,
+// so v0.2.0 reads it. A schema with one is written in format 3. Only a
+// file of format version 2 holds it (requirement L-19). v0.2.0 would
+// read a fill as null.
 const (
 	schemaFormat2 = 2
 	schemaFormat3 = 3
 )
 
-// Extended reports whether the schema has a default or a check, and so
-// needs schema format 3 and format version 2 of the file.
+// Extended reports whether the schema has a default, a fill or a check.
+// Such a schema needs schema format 3 and format version 2 of the file.
 func (s *Schema) Extended() bool {
 	for _, t := range s.Tables {
 		if len(t.Checks) > 0 {
 			return true
 		}
 		for _, c := range t.Columns {
-			if c.Default != "" {
+			if c.Default != "" || c.Fill != nil {
 				return true
 			}
 		}
@@ -305,6 +324,12 @@ func encodeSchema(s *Schema) []byte {
 			b = append(b, byte(c.Type), flags)
 			if format == schemaFormat3 {
 				str(c.Default)
+				// The fill: 0 for none, or 1 and the value.
+				if c.Fill == nil {
+					b = append(b, 0)
+				} else {
+					b = appendValue(append(b, 1), c.Fill)
+				}
 			}
 		}
 		b = binary.AppendUvarint(b, uint64(len(t.Key)))
@@ -343,10 +368,11 @@ func decodeSchema(b []byte) (*Schema, error) {
 	if d.err == nil && format != schemaFormat2 && format != schemaFormat3 {
 		return nil, d.fail("format %d; this code reads formats %d and %d", format, schemaFormat2, schemaFormat3)
 	}
-	// In format 3, a column takes 1 byte more, the length of its default.
+	// In format 3, a column takes 2 bytes more: the length of its default
+	// and the mark of its fill.
 	colSize := 3
 	if format == schemaFormat3 {
-		colSize = 4
+		colSize = 5
 	}
 	s := &Schema{Version: d.uvarint()}
 	// Each table takes at least 6 bytes, each column 3, each key column
@@ -369,6 +395,17 @@ func decodeSchema(b []byte) (*Schema, error) {
 			}
 			if format == schemaFormat3 {
 				c.Default = d.str()
+				switch d.byte() {
+				case 0:
+				case 1:
+					if _, ok := typeNames[c.Type]; ok {
+						c.Fill = d.value(c)
+					} else {
+						d.fail("column %s has %v", c.Name, c.Type)
+					}
+				default:
+					d.fail("column %s: fill mark", c.Name)
+				}
 			}
 			t.Columns = append(t.Columns, c)
 		}
@@ -423,10 +460,11 @@ func decodeSchema(b []byte) (*Schema, error) {
 	if err := d.end(); err != nil {
 		return nil, err
 	}
-	// encodeSchema never writes format 3 without a default or a check.
+	// encodeSchema never writes format 3 without a default, a fill or a
+	// check.
 	// Such a schema is in a form that v0.2.0 cannot read, for no reason.
 	if format == schemaFormat3 && !s.Extended() {
-		return nil, d.fail("format %d without a default or a check", format)
+		return nil, d.fail("format %d without a default, a fill or a check", format)
 	}
 	return s, nil
 }

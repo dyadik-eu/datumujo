@@ -334,8 +334,8 @@ func (p *parser) create() (Statement, error) {
 	return ct, p.expectOp(")")
 }
 
-// columnDef reads name type [NOT NULL | NULL | PRIMARY KEY] .... It
-// returns the position of PRIMARY KEY if the column has it.
+// columnDef reads name type [NOT NULL | NULL | PRIMARY KEY | DEFAULT d]
+// .... It returns the position of PRIMARY KEY if the column has it.
 func (p *parser) columnDef() (ColumnDef, *At, error) {
 	c := ColumnDef{At: p.tok.at}
 	var err error
@@ -372,10 +372,67 @@ func (p *parser) columnDef() (ColumnDef, *At, error) {
 				return c, nil, errAt(at, "column %s: PRIMARY KEY twice", c.Name)
 			}
 			pk = &at
+		case p.isWord("default"):
+			if c.Default != nil {
+				return c, nil, errAt(at, "column %s: DEFAULT twice", c.Name)
+			}
+			if err := p.advance(); err != nil {
+				return c, nil, err
+			}
+			if c.Default, err = p.defaultValue(); err != nil {
+				return c, nil, err
+			}
 		default:
 			return c, pk, nil
 		}
 	}
+}
+
+// defaultValue reads the value after DEFAULT: a number with an optional
+// sign, a string, a blob, NULL, TRUE, FALSE or CURRENT_TIMESTAMP. An
+// expression, also in parentheses, is not a default here (L-13).
+func (p *parser) defaultValue() (*Default, error) {
+	at := p.tok.at
+	lit := func(e Expr, err error) (*Default, error) {
+		if err != nil {
+			return nil, err
+		}
+		return &Default{At: at, Value: e.(*Literal).Value}, nil
+	}
+	switch {
+	case p.isOp("-") || p.isOp("+"):
+		negative := p.isOp("-")
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		if p.tok.kind != tInt && p.tok.kind != tFloat {
+			return nil, p.unexpected("a number after the sign of a DEFAULT")
+		}
+		return lit(p.number(at, negative))
+	case p.tok.kind == tInt || p.tok.kind == tFloat || p.tok.kind == tString || p.tok.kind == tBlob,
+		p.isKw("NULL") || p.isKw("TRUE") || p.isKw("FALSE"):
+		return lit(p.primary())
+	case p.isWord("current_timestamp"):
+		return &Default{At: at, Now: true}, p.advance()
+	}
+	return nil, p.unexpected("a constant or CURRENT_TIMESTAMP after DEFAULT")
+}
+
+// ParseDefault reads the text of a default, as Default.String writes it.
+// The schema keeps a default as this text.
+func ParseDefault(src string) (*Default, error) {
+	p := &parser{lx: lexer{src: src, line: 1, col: 1}}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+	d, err := p.defaultValue()
+	if err != nil {
+		return nil, err
+	}
+	if p.tok.kind != tEOF {
+		return nil, p.unexpected("the end of the default")
+	}
+	return d, nil
 }
 
 // typeName reads a type name and returns its column type.

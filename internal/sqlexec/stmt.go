@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/dyadik-eu/datumujo/internal/sqlparse"
 	"github.com/dyadik-eu/datumujo/internal/table"
@@ -180,11 +181,19 @@ func createTable(tx *table.Tx, s *sqlparse.CreateTable) error {
 		d.Columns = append(d.Columns, table.Column{Name: HiddenKey, Type: table.Int64})
 		d.Key = []string{HiddenKey}
 	}
+	named := &table.Table{Name: s.Name}
 	for _, c := range s.Columns {
 		if err := checkColumnName(c.At, c.Name); err != nil {
 			return err
 		}
-		d.Columns = append(d.Columns, table.Column{Name: c.Name, Type: sqlTypes[c.Type], Null: !c.NotNull && !inKey[c.Name]})
+		col := table.Column{Name: c.Name, Type: sqlTypes[c.Type], Null: !c.NotNull && !inKey[c.Name]}
+		// The column takes the next key: see autoKey.
+		auto := len(s.Key) == 1 && inKey[c.Name] && col.Type == table.Int64
+		var err error
+		if col.Default, err = defaultOf(named, c, col, auto); err != nil {
+			return err
+		}
+		d.Columns = append(d.Columns, col)
 	}
 	return engineErr(s.At, tx.CreateTable(d))
 }
@@ -234,10 +243,26 @@ func addColumn(tx *table.Tx, s *sqlparse.AddColumn) error {
 	if err := checkColumnName(s.Column.At, s.Column.Name); err != nil {
 		return err
 	}
-	if s.Column.NotNull {
-		return errAt(s.Column.At, "column %s: an added column must allow NULL; the rows that exist have no value for it", s.Column.Name)
+	t, _ := tx.Schema().Table(s.Table)
+	c := s.Column
+	col := table.Column{Name: c.Name, Type: sqlTypes[c.Type], Null: !c.NotNull}
+	if c.Default != nil && c.Default.Now {
+		return errAt(c.Default.At, "column %s: an added column takes a constant default; CURRENT_TIMESTAMP has no value for the rows that exist", c.Name)
 	}
-	return engineErr(s.At, tx.AddColumn(s.Table, table.Column{Name: s.Column.Name, Type: sqlTypes[s.Column.Type], Null: true}))
+	var err error
+	if col.Default, err = defaultOf(t, c, col, false); err != nil {
+		return err
+	}
+	// The rows that exist read the default. A column without one reads
+	// NULL there, so it must allow NULL.
+	if col.Default != "" {
+		if col.Fill, err = fitDefault(t, col, c.Default, time.Time{}); err != nil {
+			return err
+		}
+	} else if !col.Null {
+		return errAt(c.At, "column %s: an added column NOT NULL needs a DEFAULT; the rows that exist have no value for it", c.Name)
+	}
+	return engineErr(s.At, tx.AddColumn(s.Table, col))
 }
 
 // assignable reports whether a value of type from can go into a column
@@ -324,9 +349,10 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any) (Result, error) {
 		return Result{}, err
 	}
 	cols := visible(t)
+	var seen map[int]bool
 	if len(s.Columns) > 0 {
 		cols = cols[:0:0]
-		seen := map[int]bool{}
+		seen = map[int]bool{}
 		for _, name := range s.Columns {
 			i, _, err := tableScope{t}.Column("", name)
 			if err != nil {
@@ -352,10 +378,23 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any) (Result, error) {
 			rows[i] = append(rows[i], tg)
 		}
 	}
+	// A column the INSERT does not name takes its default. Without a
+	// column list, it names every column but the hidden key.
+	if seen == nil {
+		seen = map[int]bool{}
+		for _, c := range cols {
+			seen[c] = true
+		}
+	}
+	defs, err := defaults(t, seen, s.At)
+	if err != nil {
+		return Result{}, err
+	}
 	var res Result
 	auto, hasAuto := autoKey(t)
 	for i, targets := range rows {
 		row := make([]any, len(t.Columns))
+		copy(row, defs)
 		for _, tg := range targets {
 			if row[tg.col], err = tg.value(t, nil, params); err != nil {
 				return Result{}, err

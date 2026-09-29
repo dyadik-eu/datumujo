@@ -138,11 +138,22 @@ func (*Cast) expr()      {}
 func (*Case) expr()      {}
 
 // ColumnDef is a column of CREATE TABLE or ALTER TABLE ADD COLUMN.
+// Default is nil without DEFAULT.
 type ColumnDef struct {
 	At
 	Name    string
 	Type    string
 	NotNull bool
+	Default *Default
+}
+
+// Default is the DEFAULT of a column: a constant, or CURRENT_TIMESTAMP.
+// Value is as the Value of a Literal, nil for NULL; with Now set it is
+// nil.
+type Default struct {
+	At
+	Value any
+	Now   bool
 }
 
 // CreateTable is CREATE TABLE. A PRIMARY KEY on a column and a PRIMARY

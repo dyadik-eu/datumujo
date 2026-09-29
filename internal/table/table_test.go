@@ -284,6 +284,7 @@ func TestDefsRejected(t *testing.T) {
 		"default not UTF-8":    func(d *Def) { d.Columns[1].Default = "\xff" },
 		"empty check":          func(d *Def) { d.Checks = []string{"a > 0", ""} },
 		"check not UTF-8":      func(d *Def) { d.Checks = []string{"\xff"} },
+		"fill on a new column": func(d *Def) { d.Columns[1].Fill = "x" },
 	}
 	s := openStore(t, vfs.NewSim())
 	defer s.Close()
@@ -318,8 +319,8 @@ func TestDefsRejected(t *testing.T) {
 	if err := tx.AddColumn("nope", Column{Name: "c", Type: Int64, Null: true}); !errors.Is(err, ErrNoTable) {
 		t.Errorf("added column to no table: %v", err)
 	}
-	if err := tx.AddColumn("t", Column{Name: "c", Type: Int64, Null: true, Default: "0"}); !errors.Is(err, ErrSchema) {
-		t.Errorf("added column with a default: %v", err)
+	if err := tx.AddColumn("t", Column{Name: "c", Type: Int64, Fill: "zero"}); !errors.Is(err, ErrSchema) {
+		t.Errorf("added column with a fill of another type: %v", err)
 	}
 	if got := tx.Schema().Version; got != 1 {
 		t.Errorf("schema version %d after one valid change, want 1", got)
@@ -545,6 +546,88 @@ func TestFormatVersion(t *testing.T) {
 	}
 	if p, _ := v.Schema().Table("p"); len(p.Checks) != 0 || p.Columns[1].Default != "" {
 		t.Errorf("table p: %+v", p)
+	}
+}
+
+// TestFill adds a NOT NULL column of each type with a fill. The rows
+// written before read the fill, the rows written after keep their own
+// value, and both hold after a reopen. A fill raises the file to
+// format version 2, since v0.2.0 would read it as null.
+func TestFill(t *testing.T) {
+	fs := vfs.NewSim()
+	s := openStore(t, fs)
+	when := time.Date(2026, 9, 29, 12, 0, 0, 5, time.UTC)
+	fills := []Column{
+		{Name: "i", Type: Int64, Fill: int64(-7)},
+		{Name: "f", Type: Float64, Fill: math.Copysign(0, -1)},
+		{Name: "b", Type: Bool, Fill: true},
+		{Name: "s", Type: String, Fill: "ä"},
+		{Name: "y", Type: Bytes, Fill: []byte{0, 1}},
+		{Name: "m", Type: Time, Fill: when},
+		{Name: "n", Type: Int64, Null: true},
+	}
+	stx, tx := begin(t, s)
+	if err := tx.CreateTable(Def{Name: "t", Columns: []Column{{Name: "k", Type: Int64}}, Key: []string{"k"}}); err != nil {
+		t.Fatal(err)
+	}
+	for k := int64(1); k <= 2; k++ {
+		if err := tx.Insert("t", Row{k}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range fills {
+		if err := tx.AddColumn("t", c); err != nil {
+			t.Fatalf("column %s: %v", c.Name, err)
+		}
+	}
+	if stx.Version() != 2 {
+		t.Errorf("format version %d after a fill", stx.Version())
+	}
+	own := Row{int64(3), int64(1), 2.5, false, "o", []byte{9}, when.Add(time.Hour), int64(4)}
+	if err := tx.Insert("t", own); err != nil {
+		t.Fatal(err)
+	}
+	stx.Commit()
+	s.Close()
+
+	s = openStore(t, fs.Crash(nil))
+	defer s.Close()
+	snap, v := view(t, s)
+	defer snap.Close()
+	want := Row{int64(1), int64(-7), math.Copysign(0, -1), true, "ä", []byte{0, 1}, when, nil}
+	row, ok, err := v.Get("t", int64(1))
+	if err != nil || !ok || !sameRow(row, want) || !math.Signbit(row[2].(float64)) {
+		t.Fatalf("an old row: %v %v %v", row, ok, err)
+	}
+	// A caller that changes the row does not change the fill.
+	row[5].([]byte)[0] = 99
+	if again, _, _ := v.Get("t", int64(2)); again[5].([]byte)[0] != 0 {
+		t.Errorf("the fill changed through a row: %v", again[5])
+	}
+	if row, _, _ := v.Get("t", int64(3)); !sameRow(row, own) {
+		t.Errorf("a new row: %v", row)
+	}
+
+	// A unique index over the filled column sees the fill: the two old
+	// rows have the same value.
+	stx, tx = begin(t, s)
+	defer stx.Rollback()
+	if err := tx.CreateIndex("t", IndexDef{Name: "u", Columns: []string{"s"}, Unique: true}); !errors.Is(err, ErrUnique) {
+		t.Errorf("a unique index over a fill that two rows read: %v", err)
+	}
+	if err := tx.CreateIndex("t", IndexDef{Name: "by_i", Columns: []string{"i"}}); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	rows, err := tx.Scan("t", Options{Index: "by_i", From: []any{int64(-7)}, To: []any{int64(-7)}, ToInclusive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		n++
+	}
+	if err := rows.Err(); err != nil || n != 2 {
+		t.Errorf("the index finds %d rows with the fill, want 2: %v", n, err)
 	}
 }
 
@@ -1085,7 +1168,7 @@ func TestCrashWithTables(t *testing.T) {
 // its encoding is format 3.
 var extendedSchema = &Schema{Version: 5, Tables: []Table{
 	{Name: "e", Columns: []Column{{Name: "a", Type: Int64}, {Name: "b", Type: Time, Null: true, Default: "CURRENT_TIMESTAMP"}}, Key: []int{0}, Root: 3, Checks: []string{"a > 0", "a < 100"}},
-	{Name: "f", Columns: []Column{{Name: "a", Type: String}}, Key: []int{0}, Root: 4},
+	{Name: "f", Columns: []Column{{Name: "a", Type: String}, {Name: "b", Type: Time, Fill: time.Unix(5, 6).UTC()}}, Key: []int{0}, Root: 4},
 }}
 
 // TestFuzzSeedsDecode checks that the seeds of the fuzz targets decode.
@@ -1181,16 +1264,27 @@ func TestDecodersReject(t *testing.T) {
 	// 2^63 tables: as an int the count is negative, and a loop over it
 	// would read no table and report an empty schema.
 	huge := binary.AppendUvarint([]byte{schemaFormat2, 1}, 1<<63)
-	// enc in format 3: an empty default after the flags, and 0 checks
-	// at the end. It holds no default and no check, so encodeSchema
-	// writes format 2 for it.
-	bare3 := append(append([]byte{schemaFormat3}, enc[1:11]...), 0)
+	// enc in format 3: an empty default and no fill after the flags, and
+	// 0 checks at the end. It holds no default, fill or check, so
+	// encodeSchema writes format 2 for it.
+	bare3 := append(append([]byte{schemaFormat3}, enc[1:11]...), 0, 0)
 	bare3 = append(append(bare3, enc[11:]...), 0)
 	// withCheck is bare3 with one check of the given bytes.
 	withCheck := func(check ...byte) []byte {
 		b := append([]byte(nil), bare3[:len(bare3)-1]...)
 		return append(append(b, 1, byte(len(check))), check...)
 	}
+	// withFill is bare3 with a column y of type bool after x. The given
+	// bytes are the fill mark and value of y. keyFill gives the key
+	// column x a fill of 5 (the varint 10).
+	withFill := func(fill ...byte) []byte {
+		b := append([]byte(nil), bare3[:6]...)
+		b = append(b, 2)
+		b = append(b, bare3[7:13]...)
+		b = append(append(b, 1, 'y', byte(Bool), 1, 0), fill...)
+		return append(b, bare3[13:]...)
+	}
+	keyFill := append(append(append([]byte(nil), bare3[:12]...), 1, 10), bare3[13:]...)
 	defaultNotUTF8 := append([]byte(nil), withCheck('x')...)
 	defaultNotUTF8 = append(append(defaultNotUTF8[:11:11], 1, 0xff), defaultNotUTF8[12:]...)
 	// ix is enc with one index: name "i", unique flag, root 4, one column,
@@ -1226,11 +1320,15 @@ func TestDecodersReject(t *testing.T) {
 		"table count 2^63":       huge,
 		"format 4":               change(0, 4),
 		"format 3 without extra": bare3,
-		"format 2 with a check":  append(append([]byte{schemaFormat2}, withCheck('x')[1:11]...), withCheck('x')[12:]...),
+		"format 2 with a check":  append(append([]byte{schemaFormat2}, withCheck('x')[1:11]...), withCheck('x')[13:]...),
 		"empty check":            append(bare3[:len(bare3)-1:len(bare3)-1], 2, 0, 2, 'x', 'y'),
 		"check not UTF-8":        withCheck(0xff),
 		"check count too big":    append(bare3[:len(bare3)-1:len(bare3)-1], 5, 1, 'x'),
 		"default not UTF-8":      defaultNotUTF8,
+		"fill mark 2":            withFill(2),
+		"bool fill 2":            withFill(1, 2),
+		"fill cut":               withFill(1)[:len(withFill(1))-len(bare3[13:])],
+		"fill on a key column":   keyFill,
 	}
 	for name, b := range schemas {
 		if _, err := decodeSchema(b); !errors.Is(err, ErrDamaged) {
@@ -1239,9 +1337,10 @@ func TestDecodersReject(t *testing.T) {
 	}
 	// Each count lies between two bounds: the smallest size of its items
 	// in format 2 and in format 3. Only the bound of format 3 rejects it
-	// at once. bare3 holds 9 bytes after its column count, and 3 columns
-	// take at least 12. Two checks take at least 4 bytes, and 2 follow.
-	manyColumns := append([]byte(nil), bare3...)
+	// at once. manyColumns holds 12 bytes after its column count, and 3
+	// columns take at least 15. Two checks take at least 4 bytes, and 2
+	// follow.
+	manyColumns := append(append([]byte(nil), bare3...), 0, 0)
 	manyColumns[6] = 3
 	for name, b := range map[string][]byte{
 		"3 columns in format 3": manyColumns,
@@ -1251,7 +1350,7 @@ func TestDecodersReject(t *testing.T) {
 			t.Errorf("schema, %s: %v", name, err)
 		}
 	}
-	for name, b := range map[string][]byte{"the unchanged schema": enc, "one index": withIndex(0, 4, 1, 0), "one unique index": withIndex(1, 4, 1, 0), "format 3 with a check": withCheck('x')} {
+	for name, b := range map[string][]byte{"the unchanged schema": enc, "one index": withIndex(0, 4, 1, 0), "one unique index": withIndex(1, 4, 1, 0), "format 3 with a check": withCheck('x'), "a bool fill": withFill(1, 1)} {
 		if _, err := decodeSchema(b); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
