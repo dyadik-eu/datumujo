@@ -30,6 +30,9 @@ Stage 2, a core subset of SQL, is in progress. See
   with DISTINCT.
 - INNER JOIN and LEFT JOIN, with a lookup by key or index where ON or
   WHERE allows one.
+- `DB.Session`: BEGIN, COMMIT and ROLLBACK as SQL text.
+- The package `sqldriver`: the driver for `database/sql`, as
+  "datumujo".
 
 ### File format
 
