@@ -10,6 +10,16 @@ command. Stage 2 adds a core subset of SQL, a driver for `database/sql`
 and a shell. The API and the file format can still change before v1; the
 roadmap says what v1.0 promises.
 
+## Versions
+
+Use a release. `go get github.com/dyadik-eu/datumujo@latest` takes the
+newest release tag, not `main`. Each release has notes on the releases
+page and a section in [CHANGELOG.md](CHANGELOG.md).
+
+`main` holds the work towards the next release. Each change on it passed
+the checks, but its file format can still change before the tag. No
+release promises to open a file that `main` wrote.
+
 ## Use
 
 SQL through `database/sql`, with the driver of this module. The code
