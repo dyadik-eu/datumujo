@@ -80,6 +80,17 @@ type constraint struct {
 // table with a value that reads no column. Only terms joined by AND
 // count: each of them must hold for a row to pass.
 func constraints(where sqlparse.Expr, s Resolver) []constraint {
+	return constraintsFor([]sqlparse.Expr{where}, s, nil, 0, math.MaxInt)
+}
+
+// constraintsFor returns the terms of the expressions that compare a
+// column of one table of a join with a value. The table has the columns
+// lo to hi of the joined row, which full resolves. The value may read
+// the tables before it, which prefix resolves, and no other column. A
+// scan of the table runs once for each row of those tables. A nil prefix
+// allows no column. The column of a constraint counts from 0 in its
+// table.
+func constraintsFor(exprs []sqlparse.Expr, full, prefix Resolver, lo, hi int) []constraint {
 	var out []constraint
 	var walk func(e sqlparse.Expr)
 	col := func(e sqlparse.Expr) (int, bool) {
@@ -87,11 +98,14 @@ func constraints(where sqlparse.Expr, s Resolver) []constraint {
 		if !ok {
 			return 0, false
 		}
-		i, _, err := s.Column(ref.Table, ref.Name)
-		return i, err == nil
+		i, _, err := full.Column(ref.Table, ref.Name)
+		if err != nil || i < lo || i >= hi {
+			return 0, false
+		}
+		return i - lo, true
 	}
 	value := func(e sqlparse.Expr) (*Expr, bool) {
-		x, err := Compile(e, nil)
+		x, err := Compile(e, prefix)
 		return x, err == nil
 	}
 	flip := map[string]string{"=": "=", "<": ">", "<=": ">=", ">": "<", ">=": "<="}
@@ -138,8 +152,10 @@ func constraints(where sqlparse.Expr, s Resolver) []constraint {
 			out = append(out, constraint{c, "IN", vs, x.String()})
 		}
 	}
-	if where != nil {
-		walk(where)
+	for _, e := range exprs {
+		if e != nil {
+			walk(e)
+		}
 	}
 	return out
 }
@@ -295,7 +311,7 @@ func (q *Query) itemExpr(n int) sqlparse.Expr {
 	out := 0
 	for _, it := range q.st.Items {
 		if it.Star {
-			out += len(visible(q.t))
+			out += q.starWidth(it)
 			continue
 		}
 		if out == n {
@@ -361,7 +377,22 @@ func (q *Query) plan(s Resolver, lim Limits) {
 	if q.t == nil || lim.NoIndex {
 		return
 	}
-	a := choose(q.t, constraints(q.st.Where, s))
+	// Each table of a join gets its own access. Its bounds come from ON
+	// and WHERE, with values that read only the tables before it.
+	for i, src := range q.srcs {
+		exprs := []sqlparse.Expr{q.st.Where}
+		if src.onSt != nil {
+			exprs = append(exprs, src.onSt)
+		}
+		cs := constraintsFor(exprs, s, scope{q.srcs[:i]}, src.offset, src.offset+len(src.t.Columns))
+		src.access = choose(src.t, cs)
+	}
+	if len(q.srcs) > 1 {
+		return // the order of a scan fits ORDER BY for one table only
+	}
+	// The access for the order below is the one the scan reads.
+	defer func() { q.srcs[0].access = q.access }()
+	a := q.srcs[0].access
 	if q.distinct || q.group != nil || len(q.order) == 0 {
 		q.access = a
 		return
@@ -433,8 +464,9 @@ func fit(v any, typ table.Type) (any, bool) {
 }
 
 // scans turns an access into the options of the scans, in the order of
-// the key or index. params are the values of the run.
-func (a *access) scans(t *table.Table, params []any) ([]table.Options, error) {
+// the key or index. The values may read outer, the row of the tables
+// before this one in a join. The params are the values of the run.
+func (a *access) scans(t *table.Table, outer, params []any) ([]table.Options, error) {
 	// A value of a type that does not compare with its column is an
 	// error of WHERE. The scan reads the whole key or index then, in its
 	// order, so the error comes as it would without the plan.
@@ -446,7 +478,7 @@ func (a *access) scans(t *table.Table, params []any) ([]table.Options, error) {
 		typ := t.Columns[a.cols[i]].Type
 		var vals []any
 		for _, x := range c.vals {
-			v, err := x.Eval(nil, params)
+			v, err := x.Eval(outer, params)
 			if err != nil {
 				return nil, err
 			}
@@ -480,7 +512,7 @@ func (a *access) scans(t *table.Table, params []any) ([]table.Options, error) {
 			if c == nil {
 				continue
 			}
-			v, err := c.vals[0].Eval(nil, params)
+			v, err := c.vals[0].Eval(outer, params)
 			if err != nil {
 				return nil, err
 			}
@@ -583,8 +615,19 @@ func (q *Query) Plan() string {
 	switch {
 	case q.t == nil:
 		parts = append(parts, "ONE ROW")
-	default:
+	case len(q.srcs) == 1:
 		parts = append(parts, q.access.describe(q.t))
+	default:
+		for _, src := range q.srcs {
+			d := src.access.describe(src.t)
+			if src.name != src.t.Name {
+				d += " AS " + src.name
+			}
+			if src.left {
+				d = "LEFT " + d
+			}
+			parts = append(parts, d)
+		}
 	}
 	if q.group != nil {
 		parts = append(parts, "GROUP")

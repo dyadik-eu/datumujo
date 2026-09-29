@@ -148,7 +148,6 @@ func TestSelectErrors(t *testing.T) {
 		{"SELECT id FROM issue LIMIT ?", []any{nil}, 1, 28, "need an INTEGER", nil},
 		{"SELECT id FROM issue OFFSET 1", nil, 1, 22, "; or the end", nil},
 		{"SELECT id FROM issue GROUP BY state", nil, 1, 8, "column id must be in GROUP BY or in an aggregate function", nil},
-		{"SELECT id FROM issue JOIN note ON TRUE", nil, 1, 22, "JOIN is not supported yet (roadmap step 22)", ErrStatement},
 		{"SELECT id / 0 FROM issue", nil, 1, 11, "division by zero", nil},
 	} {
 		_, err := ss.query(c.src, c.params...)

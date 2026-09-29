@@ -106,6 +106,8 @@ func TestPlanForms(t *testing.T) {
 		{"SELECT * FROM t WHERE id = 5 OR id = 6", "SCAN t", 1000, 2},
 		{"SELECT * FROM t WHERE NOT id > 5", "SCAN t", 1000, 5},
 		{"SELECT * FROM t WHERE id NOT IN (1, 2)", "SCAN t", 1000, 998},
+		// Two columns of the same table: the value is no bound.
+		{"SELECT * FROM t WHERE g = id", "SCAN t", 1000, 9},
 		// = on a column beats IN on the same column.
 		{"SELECT * FROM t WHERE g IN (1, 2, 3) AND g = 2", "SEARCH t USING INDEX by_g ((g = 2))", 100, 100},
 		{"SELECT * FROM t WHERE name = 'n0005' OR g = 1", "SCAN t", 1000, 101},
