@@ -168,7 +168,7 @@ func create(fs vfs.FS, name string, opt Options) error {
 	if err != nil {
 		return err
 	}
-	hdr := page.EncodeHeader(page.Header{Version: page.Version, PageSize: ps, PageCount: 1})
+	hdr := page.EncodeHeader(page.Header{Version: page.MinVersion, PageSize: ps, PageCount: 1})
 	if _, err := f.WriteAt(hdr, 0); err != nil {
 		f.Close()
 		return err
@@ -327,6 +327,9 @@ func (r *Snapshot) Count() uint64 { return r.hdr.PageCount }
 // checkpoint brings it back to the size of the log header.
 func (s *Store) LogBytes() int64 { return s.log.Bytes() }
 
+// Version returns the format version of the file as of the snapshot.
+func (r *Snapshot) Version() uint32 { return r.hdr.Version }
+
 // Header returns the header as of the snapshot.
 func (r *Snapshot) Header() page.Header { return r.hdr }
 
@@ -419,6 +422,26 @@ func (t *Tx) FreeCount() uint64 { return t.hdr.FreeCount }
 
 // Root returns root slot i, 0 if unused.
 func (t *Tx) Root(i int) uint64 { return t.hdr.Root[i] }
+
+// Version returns the format version of the file, as this Tx changed it.
+func (t *Tx) Version() uint32 { return t.hdr.Version }
+
+// SetVersion raises the format version of the file to v. The commit
+// writes it. A version is never lowered: v must be from the current
+// version to page.Version.
+func (t *Tx) SetVersion(v uint32) error {
+	if t.done {
+		return ErrDone
+	}
+	if v < t.hdr.Version || v > page.Version {
+		return fmt.Errorf("store: format version %d; the file has %d, and this code writes up to %d", v, t.hdr.Version, page.Version)
+	}
+	if v != t.hdr.Version {
+		t.hdr.Version = v
+		t.dirty[0] = nil
+	}
+	return nil
+}
 
 // SetRoot sets root slot i to page no, or to 0 to clear it.
 func (t *Tx) SetRoot(i int, no uint64) error {

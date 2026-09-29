@@ -124,7 +124,7 @@ func TestRoundTrip(t *testing.T) {
 	stx, tx := begin(t, s)
 	for _, typ := range allTypes {
 		name := typ.String()
-		def := Def{Name: name, Columns: []Column{{"k", typ, false}, {"v", typ, true}}, Key: []string{"k"}}
+		def := Def{Name: name, Columns: []Column{{Name: "k", Type: typ, Null: false}, {Name: "v", Type: typ, Null: true}}, Key: []string{"k"}}
 		if err := tx.CreateTable(def); err != nil {
 			t.Fatal(err)
 		}
@@ -261,7 +261,7 @@ func randBytes(rng *rand.Rand, alphabet string) []byte {
 // TestDefsRejected checks each rule of a table definition.
 func TestDefsRejected(t *testing.T) {
 	ok := func() Def {
-		return Def{Name: "t", Columns: []Column{{"a", Int64, false}, {"b", String, true}}, Key: []string{"a"}}
+		return Def{Name: "t", Columns: []Column{{Name: "a", Type: Int64, Null: false}, {Name: "b", Type: String, Null: true}}, Key: []string{"a"}}
 	}
 	cases := map[string]func(d *Def){
 		"empty table name":     func(d *Def) { d.Name = "" },
@@ -270,7 +270,7 @@ func TestDefsRejected(t *testing.T) {
 		"no columns":           func(d *Def) { d.Columns = nil; d.Key = nil },
 		"too many columns": func(d *Def) {
 			for i := 0; i < MaxColumns; i++ {
-				d.Columns = append(d.Columns, Column{fmt.Sprint("c", i), Int64, true})
+				d.Columns = append(d.Columns, Column{Name: fmt.Sprint("c", i), Type: Int64, Null: true})
 			}
 		},
 		"empty column name":    func(d *Def) { d.Columns[1].Name = "" },
@@ -281,6 +281,9 @@ func TestDefsRejected(t *testing.T) {
 		"key column missing":   func(d *Def) { d.Key = []string{"z"} },
 		"key column twice":     func(d *Def) { d.Key = []string{"a", "a"} },
 		"key column with null": func(d *Def) { d.Key = []string{"b"} },
+		"default not UTF-8":    func(d *Def) { d.Columns[1].Default = "\xff" },
+		"empty check":          func(d *Def) { d.Checks = []string{"a > 0", ""} },
+		"check not UTF-8":      func(d *Def) { d.Checks = []string{"\xff"} },
 	}
 	s := openStore(t, vfs.NewSim())
 	defer s.Close()
@@ -306,14 +309,17 @@ func TestDefsRejected(t *testing.T) {
 	if err := tx.CreateTable(ok()); !errors.Is(err, ErrSchema) {
 		t.Errorf("a table that exists: %v", err)
 	}
-	if err := tx.AddColumn("t", Column{"c", Int64, false}); !errors.Is(err, ErrSchema) {
+	if err := tx.AddColumn("t", Column{Name: "c", Type: Int64, Null: false}); !errors.Is(err, ErrSchema) {
 		t.Errorf("added column without null: %v", err)
 	}
-	if err := tx.AddColumn("t", Column{"b", Int64, true}); !errors.Is(err, ErrSchema) {
+	if err := tx.AddColumn("t", Column{Name: "b", Type: Int64, Null: true}); !errors.Is(err, ErrSchema) {
 		t.Errorf("added column with a name that exists: %v", err)
 	}
-	if err := tx.AddColumn("nope", Column{"c", Int64, true}); !errors.Is(err, ErrNoTable) {
+	if err := tx.AddColumn("nope", Column{Name: "c", Type: Int64, Null: true}); !errors.Is(err, ErrNoTable) {
 		t.Errorf("added column to no table: %v", err)
+	}
+	if err := tx.AddColumn("t", Column{Name: "c", Type: Int64, Null: true, Default: "0"}); !errors.Is(err, ErrSchema) {
+		t.Errorf("added column with a default: %v", err)
 	}
 	if got := tx.Schema().Version; got != 1 {
 		t.Errorf("schema version %d after one valid change, want 1", got)
@@ -330,7 +336,7 @@ func TestRowsRejected(t *testing.T) {
 	defer s.Close()
 	stx, tx := begin(t, s)
 	defer stx.Rollback()
-	def := Def{Name: "t", Columns: []Column{{"f", Float64, false}, {"s", String, false}, {"n", Int64, true}}, Key: []string{"f"}}
+	def := Def{Name: "t", Columns: []Column{{Name: "f", Type: Float64, Null: false}, {Name: "s", Type: String, Null: false}, {Name: "n", Type: Int64, Null: true}}, Key: []string{"f"}}
 	if err := tx.CreateTable(def); err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +401,7 @@ func TestSchemaInTransaction(t *testing.T) {
 	fs := vfs.NewSim()
 	s := openStore(t, fs)
 	stx, tx := begin(t, s)
-	def := Def{Name: "t", Columns: []Column{{"a", Int64, false}}, Key: []string{"a"}}
+	def := Def{Name: "t", Columns: []Column{{Name: "a", Type: Int64, Null: false}}, Key: []string{"a"}}
 	if err := tx.CreateTable(def); err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +423,7 @@ func TestSchemaInTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	stx, tx = begin(t, s)
-	if err := tx.AddColumn("t", Column{"b", String, true}); err != nil {
+	if err := tx.AddColumn("t", Column{Name: "b", Type: String, Null: true}); err != nil {
 		t.Fatal(err)
 	}
 	// A snapshot from before the commit keeps the old schema.
@@ -445,6 +451,137 @@ func TestSchemaInTransaction(t *testing.T) {
 	}
 }
 
+// TestFormatVersion checks requirement L-19. A file stays at format
+// version 1, which v0.2.0 reads, until the first default or check. Its
+// commit raises the file to version 2; a rollback does not. The version
+// never goes back, and the defaults and checks survive a reopen.
+func TestFormatVersion(t *testing.T) {
+	fs := vfs.NewSim()
+	s := openStore(t, fs)
+	plain := Def{Name: "p", Columns: []Column{{Name: "a", Type: Int64}}, Key: []string{"a"}}
+	checked := Def{
+		Name:    "c",
+		Columns: []Column{{Name: "a", Type: Int64}, {Name: "b", Type: String, Null: true, Default: "'none'"}},
+		Key:     []string{"a"},
+		Checks:  []string{"a > 0", "length(b) < 10"},
+	}
+	version := func(want uint32, when string) {
+		t.Helper()
+		snap, err := s.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer snap.Close()
+		if snap.Version() != want {
+			t.Errorf("%s: format version %d, want %d", when, snap.Version(), want)
+		}
+	}
+
+	stx, tx := begin(t, s)
+	if err := tx.CreateTable(plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.AddColumn("p", Column{Name: "n", Type: String, Null: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.CreateIndex("p", IndexDef{Name: "by_n", Columns: []string{"n"}}); err != nil {
+		t.Fatal(err)
+	}
+	stx.Commit()
+	version(1, "a table, a column and an index")
+
+	// A default alone raises the version, and so does a check alone.
+	for _, d := range []Def{
+		{Name: "d", Columns: []Column{{Name: "a", Type: Int64, Default: "1"}}, Key: []string{"a"}},
+		{Name: "k", Columns: []Column{{Name: "a", Type: Int64}}, Key: []string{"a"}, Checks: []string{"a > 0"}},
+	} {
+		stx, tx = begin(t, s)
+		if err := tx.CreateTable(d); err != nil {
+			t.Fatal(err)
+		}
+		if stx.Version() != 2 {
+			t.Errorf("table %s: version %d in the transaction", d.Name, stx.Version())
+		}
+		stx.Rollback()
+	}
+	version(1, "two rolled back tables")
+
+	stx, tx = begin(t, s)
+	sp := tx.Savepoint()
+	if err := tx.CreateTable(checked); err != nil {
+		t.Fatal(err)
+	}
+	tx.RollbackTo(sp)
+	if stx.Version() != 1 {
+		t.Errorf("version %d after a rollback to a savepoint", stx.Version())
+	}
+	if err := tx.CreateTable(checked); err != nil {
+		t.Fatal(err)
+	}
+	stx.Commit()
+	version(2, "a table with a default and checks")
+
+	stx, tx = begin(t, s)
+	if err := tx.DropTable("c"); err != nil {
+		t.Fatal(err)
+	}
+	stx.Commit()
+	version(2, "the last default and check dropped")
+	stx, tx = begin(t, s)
+	if err := tx.CreateTable(checked); err != nil {
+		t.Fatal(err)
+	}
+	stx.Commit()
+	s.Close()
+
+	s = openStore(t, fs.Crash(nil))
+	defer s.Close()
+	version(2, "after a reopen")
+	snap, v := view(t, s)
+	defer snap.Close()
+	got, _ := v.Schema().Table("c")
+	if got.Columns[1].Default != "'none'" || got.Columns[0].Default != "" || strings.Join(got.Checks, ";") != "a > 0;length(b) < 10" {
+		t.Errorf("after a reopen: columns %+v, checks %q", got.Columns, got.Checks)
+	}
+	if p, _ := v.Schema().Table("p"); len(p.Checks) != 0 || p.Columns[1].Default != "" {
+		t.Errorf("table p: %+v", p)
+	}
+}
+
+// TestExtendedSchemaInVersion1 opens a file of format version 1 whose
+// schema holds a check. The code never writes one, so it is damage.
+func TestExtendedSchemaInVersion1(t *testing.T) {
+	fs := vfs.NewSim()
+	s := openStore(t, fs)
+	defer s.Close()
+	stx, tx := begin(t, s)
+	if err := tx.CreateTable(Def{Name: "p", Columns: []Column{{Name: "a", Type: Int64}}, Key: []string{"a"}}); err != nil {
+		t.Fatal(err)
+	}
+	// Write a schema with a check past saveSchema, which would raise the
+	// version.
+	cat, err := tx.catalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext := tx.copySchema()
+	ext.Tables[0].Checks = []string{"a > 0"}
+	if err := cat.Put(stx, schemaKey, encodeSchema(ext)); err != nil {
+		t.Fatal(err)
+	}
+	if err := stx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := s.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	if _, err := Open(snap, pageSize); !errors.Is(err, ErrDamaged) {
+		t.Errorf("a check in a file of version 1: %v", err)
+	}
+}
+
 // TestAgainstAMap runs random inserts, updates, deletes and gets on two
 // tables against a map as oracle. Batches commit or roll back, a column is
 // added on the way, and the store is reopened at the end.
@@ -454,8 +591,8 @@ func TestAgainstAMap(t *testing.T) {
 		fs := vfs.NewSim()
 		s := openStore(t, fs)
 		defs := []Def{
-			{Name: "a", Columns: []Column{{"s", String, false}, {"n", Int64, false}, {"f", Float64, true}, {"b", Bytes, true}, {"t", Time, true}, {"ok", Bool, false}}, Key: []string{"s", "n"}},
-			{Name: "b", Columns: []Column{{"id", Int64, false}, {"text", String, true}}, Key: []string{"id"}},
+			{Name: "a", Columns: []Column{{Name: "s", Type: String, Null: false}, {Name: "n", Type: Int64, Null: false}, {Name: "f", Type: Float64, Null: true}, {Name: "b", Type: Bytes, Null: true}, {Name: "t", Type: Time, Null: true}, {Name: "ok", Type: Bool, Null: false}}, Key: []string{"s", "n"}},
+			{Name: "b", Columns: []Column{{Name: "id", Type: Int64, Null: false}, {Name: "text", Type: String, Null: true}}, Key: []string{"id"}},
 		}
 		oracle := map[string]map[string]Row{"a": {}, "b": {}}
 		copyOracle := func() map[string]map[string]Row {
@@ -508,7 +645,7 @@ func TestAgainstAMap(t *testing.T) {
 			before := copyOracle()
 			stx, tx := begin(t, s)
 			if batch == 20 {
-				if err := tx.AddColumn("a", Column{"extra", Int64, true}); err != nil {
+				if err := tx.AddColumn("a", Column{Name: "extra", Type: Int64, Null: true}); err != nil {
 					t.Fatal(err)
 				}
 				for k, r := range oracle["a"] {
@@ -619,7 +756,7 @@ func TestDamagedRowIsAnError(t *testing.T) {
 	defer s.Close()
 	stx, tx := begin(t, s)
 	defer stx.Rollback()
-	def := Def{Name: "t", Columns: []Column{{"k", Int64, false}, {"v", Int64, false}}, Key: []string{"k"}}
+	def := Def{Name: "t", Columns: []Column{{Name: "k", Type: Int64, Null: false}, {Name: "v", Type: Int64, Null: false}}, Key: []string{"k"}}
 	if err := tx.CreateTable(def); err != nil {
 		t.Fatal(err)
 	}
@@ -667,11 +804,11 @@ var fuzzTable = func() *Table {
 	var cols []Column
 	var key []int
 	for i, typ := range allTypes {
-		cols = append(cols, Column{fmt.Sprint("k", i), typ, false})
+		cols = append(cols, Column{Name: fmt.Sprint("k", i), Type: typ, Null: false})
 		key = append(key, i)
 	}
 	for i, typ := range allTypes {
-		cols = append(cols, Column{fmt.Sprint("v", i), typ, true}, Column{fmt.Sprint("w", i), typ, false})
+		cols = append(cols, Column{Name: fmt.Sprint("v", i), Type: typ, Null: true}, Column{Name: fmt.Sprint("w", i), Type: typ, Null: false})
 	}
 	t := &Table{Name: "f", Columns: cols, Key: key, Root: 1, Indexes: []Index{
 		{Name: "i", Columns: []int{6, 7, 8, 9, 10, 11, 12, 13}, Root: 2},
@@ -728,7 +865,8 @@ func FuzzDecodeValues(f *testing.F) {
 
 // FuzzDecodeSchema does the same for the schema.
 func FuzzDecodeSchema(f *testing.F) {
-	f.Add(encodeSchema(&Schema{Version: 3, Tables: []Table{*fuzzTable, {Name: "g", Columns: []Column{{"a", String, false}}, Key: []int{0}, Root: 9}}}))
+	f.Add(encodeSchema(&Schema{Version: 3, Tables: []Table{*fuzzTable, {Name: "g", Columns: []Column{{Name: "a", Type: String, Null: false}}, Key: []int{0}, Root: 9}}}))
+	f.Add(encodeSchema(extendedSchema))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		s, err := decodeSchema(b)
 		if err != nil {
@@ -747,7 +885,7 @@ func FuzzDecodeSchema(f *testing.F) {
 func TestCrashWithTables(t *testing.T) {
 	// The index is on g, not on v: v holds values of a page and more, too
 	// long for a key.
-	def := Def{Name: "t", Columns: []Column{{"k", Int64, false}, {"v", String, true}, {"g", Int64, true}}, Key: []string{"k"}}
+	def := Def{Name: "t", Columns: []Column{{Name: "k", Type: Int64, Null: false}, {Name: "v", Type: String, Null: true}, {Name: "g", Type: Int64, Null: true}}, Key: []string{"k"}}
 	type step struct {
 		puts map[int64]string
 		dels []int64
@@ -821,7 +959,7 @@ func TestCrashWithTables(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if st.add && tx.AddColumn("t", Column{"n", Int64, true}) != nil {
+			if st.add && tx.AddColumn("t", Column{Name: "n", Type: Int64, Null: true}) != nil {
 				return
 			}
 			if _, err := tx.Next("steps"); err != nil {
@@ -943,6 +1081,13 @@ func TestCrashWithTables(t *testing.T) {
 	t.Logf("%d stops, %d power losses each: %d acked, %d in flight", calls+1, powers, toAcked, toRunning)
 }
 
+// extendedSchema has a default, a check, and a table with neither, so
+// its encoding is format 3.
+var extendedSchema = &Schema{Version: 5, Tables: []Table{
+	{Name: "e", Columns: []Column{{Name: "a", Type: Int64}, {Name: "b", Type: Time, Null: true, Default: "CURRENT_TIMESTAMP"}}, Key: []int{0}, Root: 3, Checks: []string{"a > 0", "a < 100"}},
+	{Name: "f", Columns: []Column{{Name: "a", Type: String}}, Key: []int{0}, Root: 4},
+}}
+
 // TestFuzzSeedsDecode checks that the seeds of the fuzz targets decode.
 // Otherwise the check that a decoded input encodes to the same bytes
 // would start from nothing.
@@ -961,6 +1106,10 @@ func TestFuzzSeedsDecode(t *testing.T) {
 	if err != nil || len(s.Tables[0].Indexes) != 2 {
 		t.Errorf("schema: %v", err)
 	}
+	enc := encodeSchema(extendedSchema)
+	if s, err := decodeSchema(enc); err != nil || enc[0] != schemaFormat3 || !bytes.Equal(encodeSchema(s), enc) {
+		t.Errorf("the extended schema: format %d, %v", enc[0], err)
+	}
 	ix := &fuzzTable.Indexes[0]
 	if _, err := decodeIndexKey(fuzzTable, ix, indexKey(fuzzTable, ix, fuzzRow()), make(Row, len(fuzzTable.Columns))); err != nil {
 		t.Errorf("index key: %v", err)
@@ -971,7 +1120,7 @@ func TestFuzzSeedsDecode(t *testing.T) {
 // checks. Each must return ErrDamaged.
 func TestDecodersReject(t *testing.T) {
 	one := func(typ Type) *Table {
-		return &Table{Name: "t", Columns: []Column{{"k", typ, false}}, Key: []int{0}, Root: 1}
+		return &Table{Name: "t", Columns: []Column{{Name: "k", Type: typ, Null: false}}, Key: []int{0}, Root: 1}
 	}
 	u64 := func(v uint64) []byte { return binary.BigEndian.AppendUint64(nil, v) }
 	keys := map[string]struct {
@@ -989,14 +1138,14 @@ func TestDecodersReject(t *testing.T) {
 		"time with 1e9 ns":       {one(Time), append(u64(signBit), 0x3b, 0x9a, 0xca, 0x00)},
 		"time short":             {one(Time), u64(signBit)},
 		"byte after the key":     {one(Bool), []byte{1, 0}},
-		"second key column gone": {&Table{Name: "t", Columns: []Column{{"a", Bool, false}, {"b", Bool, false}}, Key: []int{0, 1}}, []byte{1}},
+		"second key column gone": {&Table{Name: "t", Columns: []Column{{Name: "a", Type: Bool, Null: false}, {Name: "b", Type: Bool, Null: false}}, Key: []int{0, 1}}, []byte{1}},
 	}
 	for name, c := range keys {
 		if err := decodeKey(c.t, c.b, make(Row, len(c.t.Columns))); !errors.Is(err, ErrDamaged) {
 			t.Errorf("key, %s: %v", name, err)
 		}
 	}
-	vt := &Table{Name: "t", Columns: []Column{{"k", Int64, false}, {"a", Bool, true}, {"s", String, true}, {"m", Time, true}}, Key: []int{0}}
+	vt := &Table{Name: "t", Columns: []Column{{Name: "k", Type: Int64, Null: false}, {Name: "a", Type: Bool, Null: true}, {Name: "s", Type: String, Null: true}, {Name: "m", Type: Time, Null: true}}, Key: []int{0}}
 	values := map[string][]byte{
 		"empty":                   {},
 		"count in long form":      {0x83, 0x00, 0x07},
@@ -1014,7 +1163,7 @@ func TestDecodersReject(t *testing.T) {
 			t.Errorf("values, %s: %v", name, err)
 		}
 	}
-	good := &Schema{Version: 1, Tables: []Table{{Name: "a", Columns: []Column{{"x", Int64, false}}, Key: []int{0}, Root: 3}}}
+	good := &Schema{Version: 1, Tables: []Table{{Name: "a", Columns: []Column{{Name: "x", Type: Int64, Null: false}}, Key: []int{0}, Root: 3}}}
 	enc := encodeSchema(good)
 	change := func(i int, v byte) []byte {
 		b := append([]byte(nil), enc...)
@@ -1026,12 +1175,24 @@ func TestDecodersReject(t *testing.T) {
 	twoTables := encodeSchema(&Schema{Tables: []Table{good.Tables[0], good.Tables[0]}})
 	// A second column outside the key: its flags byte is the last but
 	// four.
-	wide := encodeSchema(&Schema{Tables: []Table{{Name: "a", Columns: []Column{{"x", Int64, false}, {"y", Int64, false}}, Key: []int{0}, Root: 3}}})
+	wide := encodeSchema(&Schema{Tables: []Table{{Name: "a", Columns: []Column{{Name: "x", Type: Int64, Null: false}, {Name: "y", Type: Int64, Null: false}}, Key: []int{0}, Root: 3}}})
 	wide[len(wide)-4] = 2
 	noKey := append(change(11, 0)[:12:12], enc[13:]...)
 	// 2^63 tables: as an int the count is negative, and a loop over it
 	// would read no table and report an empty schema.
-	huge := binary.AppendUvarint([]byte{schemaFormat, 1}, 1<<63)
+	huge := binary.AppendUvarint([]byte{schemaFormat2, 1}, 1<<63)
+	// enc in format 3: an empty default after the flags, and 0 checks
+	// at the end. It holds no default and no check, so encodeSchema
+	// writes format 2 for it.
+	bare3 := append(append([]byte{schemaFormat3}, enc[1:11]...), 0)
+	bare3 = append(append(bare3, enc[11:]...), 0)
+	// withCheck is bare3 with one check of the given bytes.
+	withCheck := func(check ...byte) []byte {
+		b := append([]byte(nil), bare3[:len(bare3)-1]...)
+		return append(append(b, 1, byte(len(check))), check...)
+	}
+	defaultNotUTF8 := append([]byte(nil), withCheck('x')...)
+	defaultNotUTF8 = append(append(defaultNotUTF8[:11:11], 1, 0xff), defaultNotUTF8[12:]...)
 	// ix is enc with one index: name "i", unique flag, root 4, one column,
 	// column 0. It ends at the old end plus 6 bytes.
 	withIndex := func(flag, root, ncols, col byte) []byte {
@@ -1063,20 +1224,41 @@ func TestDecodersReject(t *testing.T) {
 		"no key":                 noKey,
 		"flags 2 outside key":    wide,
 		"table count 2^63":       huge,
+		"format 4":               change(0, 4),
+		"format 3 without extra": bare3,
+		"format 2 with a check":  append(append([]byte{schemaFormat2}, withCheck('x')[1:11]...), withCheck('x')[12:]...),
+		"empty check":            append(bare3[:len(bare3)-1:len(bare3)-1], 2, 0, 2, 'x', 'y'),
+		"check not UTF-8":        withCheck(0xff),
+		"check count too big":    append(bare3[:len(bare3)-1:len(bare3)-1], 5, 1, 'x'),
+		"default not UTF-8":      defaultNotUTF8,
 	}
 	for name, b := range schemas {
 		if _, err := decodeSchema(b); !errors.Is(err, ErrDamaged) {
 			t.Errorf("schema, %s: %v", name, err)
 		}
 	}
-	for name, b := range map[string][]byte{"the unchanged schema": enc, "one index": withIndex(0, 4, 1, 0), "one unique index": withIndex(1, 4, 1, 0)} {
+	// Each count lies between two bounds: the smallest size of its items
+	// in format 2 and in format 3. Only the bound of format 3 rejects it
+	// at once. bare3 holds 9 bytes after its column count, and 3 columns
+	// take at least 12. Two checks take at least 4 bytes, and 2 follow.
+	manyColumns := append([]byte(nil), bare3...)
+	manyColumns[6] = 3
+	for name, b := range map[string][]byte{
+		"3 columns in format 3": manyColumns,
+		"2 checks in 2 bytes":   append(bare3[:len(bare3)-1:len(bare3)-1], 2, 1, 'x'),
+	} {
+		if _, err := decodeSchema(b); !errors.Is(err, ErrDamaged) || !strings.Contains(err.Error(), "do not fit") {
+			t.Errorf("schema, %s: %v", name, err)
+		}
+	}
+	for name, b := range map[string][]byte{"the unchanged schema": enc, "one index": withIndex(0, 4, 1, 0), "one unique index": withIndex(1, 4, 1, 0), "format 3 with a check": withCheck('x')} {
 		if _, err := decodeSchema(b); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
 	// An index key with a null mark of 2.
 	ix := &Index{Name: "i", Columns: []int{1}}
-	nt := &Table{Name: "t", Columns: []Column{{"k", Int64, false}, {"a", Int64, true}}, Key: []int{0}}
+	nt := &Table{Name: "t", Columns: []Column{{Name: "k", Type: Int64, Null: false}, {Name: "a", Type: Int64, Null: true}}, Key: []int{0}}
 	if _, err := decodeIndexKey(nt, ix, append([]byte{2}, appendKey(nil, Int64, int64(5))...), make(Row, 2)); !errors.Is(err, ErrDamaged) {
 		t.Errorf("index key, null mark 2: %v", err)
 	}

@@ -18,11 +18,11 @@ import (
 
 // The table of the index tests: issues of repositories.
 var issueDef = Def{Name: "issue", Columns: []Column{
-	{"repo", Int64, false},
-	{"num", Int64, false},
-	{"state", String, false},
-	{"title", String, true},
-	{"score", Float64, true},
+	{Name: "repo", Type: Int64, Null: false},
+	{Name: "num", Type: Int64, Null: false},
+	{Name: "state", Type: String, Null: false},
+	{Name: "title", Type: String, Null: true},
+	{Name: "score", Type: Float64, Null: true},
 }, Key: []string{"repo", "num"}}
 
 var issueIndexes = []IndexDef{
@@ -457,7 +457,7 @@ func TestIndexRules(t *testing.T) {
 	stx.Rollback()
 
 	stx, tx = begin(t, s)
-	if err := tx.CreateTable(Def{Name: "m", Columns: []Column{{"k", Int64, false}, {"f", Float64, true}, {"s", String, true}}, Key: []string{"k"}}); err != nil {
+	if err := tx.CreateTable(Def{Name: "m", Columns: []Column{{Name: "k", Type: Int64, Null: false}, {Name: "f", Type: Float64, Null: true}, {Name: "s", Type: String, Null: true}}, Key: []string{"k"}}); err != nil {
 		t.Fatal(err)
 	}
 	// NaN is a value outside an index.
@@ -511,7 +511,7 @@ func TestIndexRules(t *testing.T) {
 	}
 	// A primary key too long, in a table without an index: the check
 	// runs before the tree, which would refuse it with its own error.
-	if err := tx.CreateTable(Def{Name: "p", Columns: []Column{{"k", String, false}}, Key: []string{"k"}}); err != nil {
+	if err := tx.CreateTable(Def{Name: "p", Columns: []Column{{Name: "k", Type: String, Null: false}}, Key: []string{"k"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Insert("p", Row{strings.Repeat("x", max)}); !errors.Is(err, ErrValue) {
@@ -713,6 +713,7 @@ type emptyReader struct{}
 
 func (emptyReader) Read(uint64, []byte) error { return errors.New("no pages") }
 func (emptyReader) Root(int) uint64           { return 0 }
+func (emptyReader) Version() uint32           { return 1 }
 
 // TestIndexDamaged writes index entries that do not match the table.
 // Scans and deletes return ErrDamaged instead of a wrong row.

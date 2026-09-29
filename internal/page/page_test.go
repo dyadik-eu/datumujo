@@ -104,8 +104,9 @@ func TestReadPassesOnFileErrors(t *testing.T) {
 }
 
 func TestHeaderRoundTrip(t *testing.T) {
-	for _, size := range []int{MinSize, 4096, MaxSize} {
-		h := Header{Version: Version, PageSize: size, PageCount: 12345, FreeHead: 77, FreeCount: 3, Root: [Roots]uint64{5, 0, 900, 12344}}
+	for i, size := range []int{MinSize, 4096, MaxSize} {
+		// Both versions this code reads.
+		h := Header{Version: []uint32{MinVersion, Version, MinVersion}[i], PageSize: size, PageCount: 12345, FreeHead: 77, FreeCount: 3, Root: [Roots]uint64{5, 0, 900, 12344}}
 		s := vfs.NewSim()
 		f, _ := s.Open("db")
 		f.WriteAt(EncodeHeader(h), 0)
@@ -144,17 +145,24 @@ func TestHeaderRejects(t *testing.T) {
 		{"empty file", nil, func(err error) bool { return errors.Is(err, ErrNotDatabase) }},
 		{"other magic", edit(func(p []byte) { p[0] = 'X' }), func(err error) bool { return errors.Is(err, ErrNotDatabase) }},
 		{"magic only", good[:8], func(err error) bool { return damagedPage(err, 0) }},
-		{"version 2", edit(func(p []byte) { binary.BigEndian.PutUint32(p[8:], 2) }), func(err error) bool {
-			return errors.As(err, &verr) && verr.Version == 2
+		{"version 3", edit(func(p []byte) { binary.BigEndian.PutUint32(p[8:], 3) }), func(err error) bool {
+			return errors.As(err, &verr) && verr.Version == 3
 		}},
-		{"version 2, resealed", edit(func(p []byte) { binary.BigEndian.PutUint32(p[8:], 2); Seal(p, 0) }), func(err error) bool {
-			return errors.As(err, &verr) && verr.Version == 2
+		{"version 3, resealed", edit(func(p []byte) { binary.BigEndian.PutUint32(p[8:], 3); Seal(p, 0) }), func(err error) bool {
+			return errors.As(err, &verr) && verr.Version == 3
+		}},
+		{"version 0, resealed", edit(func(p []byte) { binary.BigEndian.PutUint32(p[8:], 0); Seal(p, 0) }), func(err error) bool {
+			return errors.As(err, &verr) && verr.Version == 0
 		}},
 		{"page size 1000", edit(func(p []byte) { binary.BigEndian.PutUint32(p[12:], 1000) }), func(err error) bool { return damagedPage(err, 0) }},
 		{"page size larger than the file", edit(func(p []byte) { binary.BigEndian.PutUint32(p[12:], 8192); Seal(p, 0) }), func(err error) bool { return damagedPage(err, 0) }},
 		{"damaged count", edit(func(p []byte) { p[20] ^= 1 }), func(err error) bool { return damagedPage(err, 0) }},
 		{"page count 0", edit(func(p []byte) { binary.BigEndian.PutUint64(p[16:], 0); Seal(p, 0) }), func(err error) bool { return damagedPage(err, 0) }},
 		{"cut after the fields", good[:100], func(err error) bool { return damagedPage(err, 0) }},
+		{"version 3, cut after the fields", edit(func(p []byte) { binary.BigEndian.PutUint32(p[8:], 3) })[:100], func(err error) bool {
+			return errors.As(err, &verr) && verr.Version == 3
+		}},
+		{"version 1, cut after the fields", edit(func(p []byte) { binary.BigEndian.PutUint32(p[8:], 1) })[:100], func(err error) bool { return damagedPage(err, 0) }},
 		{"free head past the end", edit(func(p []byte) {
 			binary.BigEndian.PutUint64(p[24:], 1)
 			binary.BigEndian.PutUint64(p[32:], 1)
