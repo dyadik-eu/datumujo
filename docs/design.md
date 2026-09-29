@@ -656,6 +656,26 @@ another connection of the pool; readers never wait. A test runs four
 writers and four readers on a pool of four connections under the race
 detector.
 
+## The command sql
+
+`datumujo sql FILE [SQL]` runs the SQL text of its argument, or else of
+its input, on a Session (L-12). For each SELECT it prints a line with
+the names of the columns, then a line per row, with a tab between the
+values. Three kinds of text print as a SQL literal in quotes. They are
+a text with a tab or a line break, the text NULL, and a text that
+starts with a quote. So each
+line stays one row, and NULL stays apart from the text 'NULL'.
+
+The first statement that fails stops the text, like the flag -bail of
+sqlite3. A transaction that is still open rolls back. The command
+exits 0 when all statements ran, 1 when one failed, and 2 when it
+could not open the file.
+
+The command runs a text through Session.Script. Script runs the
+statements in order and hands the rows of each SELECT to a function.
+An error in a row stops the script even when that function does not
+ask for it.
+
 ## Counters
 
 A counter is a number in the catalog tree, stored with the rows of the

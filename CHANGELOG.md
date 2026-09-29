@@ -33,6 +33,9 @@ Stage 2, a core subset of SQL, is in progress. See
 - `DB.Session`: BEGIN, COMMIT and ROLLBACK as SQL text.
 - The package `sqldriver`: the driver for `database/sql`, as
   "datumujo".
+- `datumujo sql FILE [SQL]` runs SQL from its argument or its input and
+  prints the rows. `Session.Script` runs a text of several statements,
+  SELECT included.
 
 ### File format
 

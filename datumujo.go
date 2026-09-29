@@ -333,6 +333,11 @@ func query(src sqlexec.Source, lim sqlexec.Limits, q string, params []any) (*sql
 	if err != nil {
 		return nil, err
 	}
+	return runSelect(src, lim, sel, ps)
+}
+
+// runSelect runs a parsed SELECT on src.
+func runSelect(src sqlexec.Source, lim sqlexec.Limits, sel *sqlparse.Select, ps []any) (*sqlexec.Rows, error) {
 	pq, err := sqlexec.Prepare(src.Schema(), sel, lim)
 	if err != nil {
 		return nil, err
