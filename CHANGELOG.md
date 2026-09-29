@@ -36,6 +36,8 @@ Stage 2, a core subset of SQL, is in progress. See
 - `datumujo sql FILE [SQL]` runs SQL from its argument or its input and
   prints the rows. `Session.Script` runs a text of several statements,
   SELECT included.
+- `docs/sql.md` describes the SQL of stage 2 and its limits, each limit
+  with a test at its edge.
 
 ### File format
 
