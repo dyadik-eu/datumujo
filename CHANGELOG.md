@@ -4,10 +4,11 @@ Each release lists what a program that uses datumujo must know: new
 functions, changes to the API or to the file format, and fixes. Before v1,
 the API and the file format can change in any release.
 
-## Unreleased
+## v0.2.0, 2026-09-29
 
-Stage 2, a core subset of SQL, is in progress. See
-[docs/roadmap.md](docs/roadmap.md), steps 14 to 25.
+Stage 2: a core subset of SQL on the tables of stage 1, steps 14 to 25
+of [docs/roadmap.md](docs/roadmap.md). The SQL and its limits are in
+[docs/sql.md](docs/sql.md).
 
 ### Added
 
@@ -41,7 +42,10 @@ Stage 2, a core subset of SQL, is in progress. See
 
 ### File format
 
-No change. A file of v0.1.0 opens without a conversion.
+No change. A file of v0.1.0 opens without a conversion. Measured on
+2026-09-29 with a file that v0.1.0 wrote, with a table and an index. It
+takes SELECT, GROUP BY, INSERT and UPDATE through `datumujo sql`, and the
+check finds it intact.
 
 ## v0.1.0, 2026-09-27
 
