@@ -3,11 +3,12 @@
 An embedded database for Go, written with the Go standard library only.
 datumujo is Esperanto for "data container".
 
-**Status: the first stage is built and tagged as v0.1.0.** It is a
-storage engine with a typed Go API. It has tables with a primary key,
-secondary and unique indexes, scans and counters. One writer runs while
-readers never wait, and there are backup and a check command. A subset of SQL is the second stage.
-The API and the file format can still change before v1.
+**Status: v0.2.0.** Stage 1 is a storage engine with a typed Go API: tables
+with a primary key, secondary and unique indexes, scans and counters. One
+writer runs while readers never wait, and there are backup and a check
+command. Stage 2 adds a core subset of SQL, a driver for `database/sql`
+and a shell. The API and the file format can still change before v1; the
+roadmap says what v1.0 promises.
 
 ## Use
 

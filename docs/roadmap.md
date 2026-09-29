@@ -50,7 +50,7 @@ the requirements it names.
 | 24 | SQL shell in the command | L-12 |
 | 25 | Random statements against the oracle; the SQL dialect and its limits in the docs | P-4 |
 
-Stage 2 is tagged as v0.2.0 when step 25 is done.
+Stage 2 is tagged as v0.2.0.
 
 # Towards v1.0
 
