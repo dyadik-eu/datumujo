@@ -108,8 +108,9 @@ names the page (I-1). The read returns no data.
 Page 0 is the header. It holds a magic value, the format version, the page
 size and the page count. It also holds the head and length of the free list,
 and four root slots. A
-file with an unknown format version is rejected (I-4). Every page number in
-the header must point into the file.
+file with a format version this code does not read is rejected (I-4).
+Every page number in the header must point into the file. The format
+versions are in "Format versions" below.
 
 Page 0 belongs to the store. Readers and the writer do not read it as a
 page; they read its fields. Inside a write transaction the fields show the
@@ -271,6 +272,54 @@ The decoders of keys, rows and the schema accept only what the encoders
 write. Numbers are in their shortest form. No bit is set past the last
 column, and no byte follows the end. A fuzz test checks for each decoder that an input it
 accepts encodes to the same bytes.
+
+## Format versions
+
+Format version 1 is the file of v0.1.0 and v0.2.0. Version 2 adds two
+things to the schema: the text of a default for each column, and the
+texts of the checks of each table. That is schema format 3. The pages,
+the log, the keys and the rows are the same in both versions.
+
+This code reads both (I-3). A new file has version 1. The commit that
+writes the first default or check raises the file to version 2
+(requirement L-19). So a program that uses only what v0.2.0 knows keeps
+files that the old release reads. A file of version 2 gets the error for
+an unknown version from v0.2.0, before it reads a page past the header
+(I-4).
+
+The rules hold in both directions:
+
+* A schema without a default or a check is written in schema format 2,
+  the format of v0.2.0. A schema with one is written in format 3.
+* A file of version 1 with a schema of format 3 is damaged. So is a
+  schema of format 3 without a default or a check: that is not what the
+  encoder writes.
+* A version is never lowered. When the last default or check is dropped,
+  the file stays at version 2.
+
+This package stores the texts and does not read them. The SQL layer
+parses them (L-13, L-14).
+
+### Rejected: lower the version again
+
+A file could go back to version 1 when the last default or check is
+dropped. It would not help v0.2.0 at once. Open reads the header in the
+file before the log. A lowered version reaches the file only at a
+checkpoint. Until then, v0.2.0 refuses the file anyway. A version that
+only goes up is one state less to test.
+
+### Rejected: raise every file to version 2
+
+v0.3 could write version 2 into each file it opens. Nothing in such a
+file needs version 2, and v0.2.0 could no longer read it.
+
+The tests are `TestFormatVersion` and `TestExtendedSchemaInVersion1` in
+`internal/table`, and `TestFileOfV020` and `TestFileOfV2` in the root
+package. `testdata/format/v0.2.0.db` is a file that v0.2.0 wrote.
+`tests/format.test.sh` builds the tag v0.2.0 and checks that it writes
+this file again, byte for byte. It then checks that v0.2.0 reads it and
+refuses `testdata/format/v2.db`, with a positive control for the build
+of the tag.
 
 ## Indexes
 

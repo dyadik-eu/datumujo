@@ -10,9 +10,17 @@ import (
 	"github.com/dyadik-eu/datumujo/internal/vfs"
 )
 
-// Version is the format version this code writes. A file with another
+// Version is the newest format version this code reads and writes. It
+// reads each version from MinVersion to Version. A file with another
 // version is rejected, not read on a best-effort basis (I-4).
-const Version = 1
+//
+// Version 1 is the format of v0.1.0 and v0.2.0. Version 2 adds defaults
+// and checks to the schema; the page layer is the same. A new file has
+// version 1, and the layer above raises it (requirement L-19).
+const (
+	MinVersion = 1
+	Version    = 2
+)
 
 // Magic starts every database file.
 var Magic = [8]byte{'d', 'a', 't', 'u', 'm', 'u', 'j', 'o'}
@@ -48,8 +56,11 @@ var ErrNotDatabase = errors.New("not a datumujo file")
 type VersionError struct{ Version uint32 }
 
 func (e *VersionError) Error() string {
-	return fmt.Sprintf("format version %d is not supported; this code reads version %d", e.Version, Version)
+	return fmt.Sprintf("format version %d is not supported; this code reads versions %d to %d", e.Version, MinVersion, Version)
 }
+
+// supported reports whether this code reads format version v.
+func supported(v uint32) bool { return v >= MinVersion && v <= Version }
 
 // EncodeHeader returns page 0 for h, sealed. h.PageSize must be valid.
 func EncodeHeader(h Header) []byte {
@@ -85,7 +96,7 @@ func DecodeHeader(p []byte) (Header, error) {
 	for i := range h.Root {
 		h.Root[i] = binary.BigEndian.Uint64(p[40+8*i:])
 	}
-	if h.Version != Version {
+	if !supported(h.Version) {
 		return Header{}, &VersionError{h.Version}
 	}
 	if !ValidSize(h.PageSize) {
@@ -133,7 +144,7 @@ func ReadHeader(f vfs.File) (Header, error) {
 	}
 	p := make([]byte, size)
 	if err := Read(f, 0, p); err != nil {
-		if v := binary.BigEndian.Uint32(first[8:]); v != Version {
+		if v := binary.BigEndian.Uint32(first[8:]); !supported(v) {
 			return Header{}, &VersionError{v}
 		}
 		return Header{}, err

@@ -883,6 +883,62 @@ func TestRoots(t *testing.T) {
 	}
 }
 
+// TestVersion: a new file has version 1. A Tx that raises it and
+// changes nothing else commits the new version, which survives a reopen.
+// A rollback, of the Tx or to a savepoint, keeps the old one. A version
+// is never lowered, and never set past what this code writes.
+func TestVersion(t *testing.T) {
+	fs := vfs.NewSim()
+	s := mustOpen(t, fs)
+	if tx := begin(t, s); tx.Version() != 1 {
+		t.Fatalf("a new file has version %d", tx.Version())
+	} else {
+		tx.Rollback()
+	}
+	tx := begin(t, s)
+	sp := tx.Savepoint()
+	if err := tx.SetVersion(2); err != nil || tx.Version() != 2 {
+		t.Fatalf("SetVersion(2): %v, version %d", err, tx.Version())
+	}
+	tx.RollbackTo(sp)
+	if tx.Version() != 1 {
+		t.Errorf("version %d after a rollback to a savepoint", tx.Version())
+	}
+	tx.SetVersion(2)
+	tx.Rollback()
+	old, _ := s.Snapshot()
+	tx = begin(t, s)
+	if tx.Version() != 1 {
+		t.Errorf("version %d after a rollback", tx.Version())
+	}
+	tx.SetVersion(2)
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if old.Version() != 1 {
+		t.Errorf("the snapshot before the commit has version %d", old.Version())
+	}
+	old.Close()
+	tx = begin(t, s)
+	for _, v := range []uint32{1, 0, page.Version + 1} {
+		if err := tx.SetVersion(v); err == nil || tx.Version() != 2 {
+			t.Errorf("SetVersion(%d) in a file of version 2: %v, version %d", v, err, tx.Version())
+		}
+	}
+	if err := tx.SetVersion(2); err != nil {
+		t.Errorf("SetVersion to the version the file has: %v", err)
+	}
+	tx.Rollback()
+	s.Close()
+	s = mustOpen(t, fs.Crash(nil))
+	defer s.Close()
+	if r, _ := s.Snapshot(); r.Version() != 2 {
+		t.Errorf("version %d after a reopen", r.Version())
+	} else {
+		r.Close()
+	}
+}
+
 // TestFreePages checks the walk of the free list. The pages freed last
 // come first. A damaged list is an error that names the page.
 func TestFreePages(t *testing.T) {

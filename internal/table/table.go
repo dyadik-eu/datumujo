@@ -17,18 +17,21 @@ const CatalogSlot = 0
 // schemaKey is the key of the schema in the catalog tree.
 var schemaKey = []byte("schema")
 
-// Reader reads pages and root slots: a snapshot or a write transaction of
-// the store.
+// Reader reads pages, root slots and the format version of the file: a
+// snapshot or a write transaction of the store.
 type Reader interface {
 	btree.Pages
 	Root(i int) uint64
+	Version() uint32
 }
 
 // Writer also changes them: a write transaction of the store.
 type Writer interface {
 	btree.WritePages
 	Root(i int) uint64
+	Version() uint32
 	SetRoot(i int, no uint64) error
+	SetVersion(v uint32) error
 	Savepoint() store.Savepoint
 	RollbackTo(sp store.Savepoint) error
 }
@@ -67,6 +70,9 @@ func Open(r Reader, pageSize int) (*View, error) {
 	}
 	if v.schema, err = decodeSchema(b); err != nil {
 		return nil, err
+	}
+	if v.schema.Extended() && r.Version() < 2 {
+		return nil, &damaged{"schema", fmt.Sprintf("a default or a check in a file of format version %d", r.Version())}
 	}
 	return v, nil
 }
@@ -168,11 +174,18 @@ func (tx *Tx) catalog() (*btree.Tree, error) {
 	return cat, cat.Put(tx.w, schemaKey, encodeSchema(tx.schema))
 }
 
-// saveSchema writes the schema with the next version.
+// saveSchema writes the schema with the next version. The first default
+// or check raises the file to format version 2. A file never goes back
+// to version 1, even when the last one is dropped.
 func (tx *Tx) saveSchema(s *Schema) error {
 	cat, err := tx.catalog()
 	if err != nil {
 		return err
+	}
+	if s.Extended() && tx.w.Version() < 2 {
+		if err := tx.w.SetVersion(2); err != nil {
+			return err
+		}
 	}
 	s.Version = tx.schema.Version + 1
 	if err := cat.Put(tx.w, schemaKey, encodeSchema(s)); err != nil {
@@ -210,11 +223,14 @@ func (tx *Tx) CreateTable(d Def) error {
 	return tx.saveSchema(s)
 }
 
-// AddColumn adds a column at the end of a table. It must allow null: the
-// rows written before read it as null.
+// AddColumn adds a column at the end of a table. It must allow null and
+// have no default: the rows written before read it as null.
 func (tx *Tx) AddColumn(table string, c Column) error {
 	if !c.Null {
 		return schemaErr("table %s: added column %s must allow null", table, c.Name)
+	}
+	if c.Default != "" {
+		return schemaErr("table %s: added column %s has a default", table, c.Name)
 	}
 	if _, err := tx.table(table); err != nil {
 		return err

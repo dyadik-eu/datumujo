@@ -4,6 +4,25 @@ Each release lists what a program that uses datumujo must know: new
 functions, changes to the API or to the file format, and fixes. Before v1,
 the API and the file format can change in any release.
 
+## Unreleased
+
+### Added
+
+- `Column.Default` and `Def.Checks`, with `Table.Checks`: the schema
+  holds the text of a default for each column and the texts of the
+  checks of a table. This release stores them; no layer applies them
+  yet.
+- `datumujo check` and `Stats.FormatVersion` report the format version.
+
+### File format
+
+Format version 2. The file becomes version 2 with the commit of its
+first default or check, and stays at version 2. A file without them
+stays at version 1, which v0.2.0 reads. A file of version 2 gets the
+error "format version 2 is not supported" from v0.2.0. This release reads
+files of versions 1 and 2. See "Format versions" in
+[docs/design.md](docs/design.md).
+
 ## v0.2.0, 2026-09-29
 
 Stage 2: a core subset of SQL on the tables of stage 1, steps 14 to 25

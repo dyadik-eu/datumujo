@@ -50,6 +50,7 @@ type Stats struct {
 	FileBytes, LogBytes int64
 	Opened              bool
 	PageSize            int
+	FormatVersion       uint32 // 1 is read by v0.2.0 and later, 2 by v0.3.0 and later
 	Pages               uint64 // pages of the database, the header included
 	FreePages           uint64
 	CatalogPages        int
@@ -123,6 +124,7 @@ func Run(fs vfs.FS, name string) (*Report, error) {
 	defer snap.Close()
 	c := &checker{r: r, snap: snap, pageSize: s.PageSize(), owner: map[uint64]string{}, damaged: map[uint64]bool{}, complete: true}
 	r.Stats.PageSize, r.Stats.Pages, r.Stats.FreePages = s.PageSize(), snap.Count(), snap.FreeCount()
+	r.Stats.FormatVersion = snap.Version()
 	if err := c.pages(); err != nil {
 		return nil, cannot(err)
 	}

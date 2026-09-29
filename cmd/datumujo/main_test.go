@@ -71,7 +71,7 @@ func TestExitCodes(t *testing.T) {
 	}
 	s.Close()
 	code, stdout, _ = exit("check", "db")
-	for _, want := range []string{"intact", "table t: 3 rows", "index i: 3 entries", "1 free", "schema version: 2"} {
+	for _, want := range []string{"intact", "table t: 3 rows", "index i: 3 entries", "1 free", "format version: 1", "schema version: 2"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("intact: output lacks %q:\n%s", want, stdout)
 		}

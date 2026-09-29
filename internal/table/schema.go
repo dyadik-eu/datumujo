@@ -35,18 +35,25 @@ func (t Type) String() string {
 }
 
 // Column is one column of a table. A column with Null set can hold null.
+// Default is the text of its default, "" for none. This package keeps
+// the text and does not read it; the layer that writes it gives it
+// meaning.
 type Column struct {
-	Name string
-	Type Type
-	Null bool
+	Name    string
+	Type    Type
+	Null    bool
+	Default string
 }
 
-// Def defines a table: its name, its columns in order, and the names of
-// the columns of its primary key, in key order.
+// Def defines a table: its name, its columns in order, the names of
+// the columns of its primary key in key order, and its checks. This
+// package keeps the texts of checks, as of defaults, and does not read
+// them.
 type Def struct {
 	Name    string
 	Columns []Column
 	Key     []string
+	Checks  []string
 }
 
 // Limits of a schema.
@@ -80,6 +87,7 @@ type Table struct {
 	Key     []int  // column numbers of the primary key, in key order
 	Root    uint64 // root page of the table's tree
 	Indexes []Index
+	Checks  []string
 }
 
 // Index returns the index with the given name.
@@ -142,6 +150,14 @@ func (t *Table) check() error {
 		seen[c.Name] = true
 		if _, ok := typeNames[c.Type]; !ok {
 			return schemaErr("table %s: column %s has %v", t.Name, c.Name, c.Type)
+		}
+		if !utf8.ValidString(c.Default) {
+			return schemaErr("table %s: the default of column %s is not UTF-8", t.Name, c.Name)
+		}
+	}
+	for i, c := range t.Checks {
+		if c == "" || !utf8.ValidString(c) {
+			return schemaErr("table %s: check %d must be text of UTF-8, not empty", t.Name, i+1)
 		}
 	}
 	if len(t.Key) == 0 {
@@ -209,7 +225,7 @@ func (t *Table) columnNumbers(what string, names []string) ([]int, error) {
 
 // fromDef turns a definition into a table without a root.
 func fromDef(d Def) (Table, error) {
-	t := Table{Name: d.Name, Columns: append([]Column(nil), d.Columns...)}
+	t := Table{Name: d.Name, Columns: append([]Column(nil), d.Columns...), Checks: append([]string(nil), d.Checks...)}
 	var err error
 	if t.Key, err = t.columnNumbers("key", d.Key); err != nil {
 		return Table{}, err
@@ -233,15 +249,43 @@ func (t *Table) values() []int {
 	return v
 }
 
-// schemaFormat is the first byte of an encoded schema.
-// Format 1 had no indexes. No release wrote it, and this code does not
-// read it.
-const schemaFormat = 2
+// The first byte of an encoded schema is its format. Format 1 had no
+// indexes; no release wrote it, and this code does not read it. Format 2
+// is the schema of v0.1.0 and v0.2.0. Format 3 adds a default to each
+// column and checks to each table.
+//
+// A schema without a default or a check is written in format 2, so
+// v0.2.0 reads it. A schema with one is written in format 3, and only a
+// file of format version 2 holds it (requirement L-19).
+const (
+	schemaFormat2 = 2
+	schemaFormat3 = 3
+)
+
+// Extended reports whether the schema has a default or a check, and so
+// needs schema format 3 and format version 2 of the file.
+func (s *Schema) Extended() bool {
+	for _, t := range s.Tables {
+		if len(t.Checks) > 0 {
+			return true
+		}
+		for _, c := range t.Columns {
+			if c.Default != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // encodeSchema writes the schema. decodeSchema of the result gives the
 // same schema, and encodeSchema of a decoded schema gives the same bytes.
 func encodeSchema(s *Schema) []byte {
-	b := []byte{schemaFormat}
+	format := byte(schemaFormat2)
+	if s.Extended() {
+		format = schemaFormat3
+	}
+	b := []byte{format}
 	b = binary.AppendUvarint(b, s.Version)
 	b = binary.AppendUvarint(b, uint64(len(s.Tables)))
 	str := func(v string) {
@@ -259,6 +303,9 @@ func encodeSchema(s *Schema) []byte {
 				flags = 1
 			}
 			b = append(b, byte(c.Type), flags)
+			if format == schemaFormat3 {
+				str(c.Default)
+			}
 		}
 		b = binary.AppendUvarint(b, uint64(len(t.Key)))
 		for _, k := range t.Key {
@@ -278,6 +325,12 @@ func encodeSchema(s *Schema) []byte {
 				b = binary.AppendUvarint(b, uint64(c))
 			}
 		}
+		if format == schemaFormat3 {
+			b = binary.AppendUvarint(b, uint64(len(t.Checks)))
+			for _, c := range t.Checks {
+				str(c)
+			}
+		}
 	}
 	return b
 }
@@ -286,8 +339,14 @@ func encodeSchema(s *Schema) []byte {
 // for a valid schema, and returns an error for anything else.
 func decodeSchema(b []byte) (*Schema, error) {
 	d := decoder{b: b, what: "schema"}
-	if f := d.byte(); d.err == nil && f != schemaFormat {
-		return nil, d.fail("format %d; this code reads format %d", f, schemaFormat)
+	format := d.byte()
+	if d.err == nil && format != schemaFormat2 && format != schemaFormat3 {
+		return nil, d.fail("format %d; this code reads formats %d and %d", format, schemaFormat2, schemaFormat3)
+	}
+	// In format 3, a column takes 1 byte more, the length of its default.
+	colSize := 3
+	if format == schemaFormat3 {
+		colSize = 4
 	}
 	s := &Schema{Version: d.uvarint()}
 	// Each table takes at least 6 bytes, each column 3, each key column
@@ -297,7 +356,7 @@ func decodeSchema(b []byte) (*Schema, error) {
 	for i := 0; i < n && d.err == nil; i++ {
 		t := Table{Name: d.str()}
 		t.Root = d.uvarint()
-		cols := d.count(3)
+		cols := d.count(colSize)
 		for j := 0; j < cols && d.err == nil; j++ {
 			c := Column{Name: d.str()}
 			c.Type = Type(d.byte())
@@ -307,6 +366,9 @@ func decodeSchema(b []byte) (*Schema, error) {
 				c.Null = true
 			default:
 				d.fail("column flags")
+			}
+			if format == schemaFormat3 {
+				c.Default = d.str()
 			}
 			t.Columns = append(t.Columns, c)
 		}
@@ -337,6 +399,13 @@ func decodeSchema(b []byte) (*Schema, error) {
 			}
 			t.Indexes = append(t.Indexes, ix)
 		}
+		if format == schemaFormat3 {
+			// Each check takes at least 2 bytes: a length and a byte.
+			nc := d.count(2)
+			for j := 0; j < nc && d.err == nil; j++ {
+				t.Checks = append(t.Checks, d.str())
+			}
+		}
 		if d.err != nil {
 			break
 		}
@@ -353,6 +422,11 @@ func decodeSchema(b []byte) (*Schema, error) {
 	}
 	if err := d.end(); err != nil {
 		return nil, err
+	}
+	// encodeSchema never writes format 3 without a default or a check.
+	// Such a schema is in a form that v0.2.0 cannot read, for no reason.
+	if format == schemaFormat3 && !s.Extended() {
+		return nil, d.fail("format %d without a default or a check", format)
 	}
 	return s, nil
 }
