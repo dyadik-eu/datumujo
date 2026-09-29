@@ -153,3 +153,21 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | `sum` or `avg` of TEXT or BOOLEAN | the values as numbers: 'a' is 0, TRUE is 1 | error: they need INTEGER or REAL |
 | `sum` of REAL past float64 | Inf | error: REAL overflow |
 | `count()` without an argument | the same as `count(*)` | error: write `count(*)` |
+
+## Stage 3: SQL for programs
+
+Decided on 2026-09-29: v0.3 adds what programs need beyond the core of
+stage 2. The requirements of stages 1 and 2 hold.
+
+| ID | Requirement |
+|---|---|
+| L-13 | DEFAULT on a column: a constant, or CURRENT_TIMESTAMP for a TIMESTAMP column. An INSERT without a value for the column takes it. ALTER TABLE ADD COLUMN with DEFAULT gives the rows that exist the value too, so the column can be NOT NULL. |
+| L-14 | CHECK on a column and on a table. An INSERT or UPDATE fails when a check is FALSE; NULL passes, as in SQL. |
+| L-15 | UNIQUE on a column, and UNIQUE (a, b) on a table. Each is a unique index. |
+| L-16 | Subqueries: a scalar subquery in an expression, IN (SELECT ...) and EXISTS, also with columns of the query around them. A scalar subquery with more than one row is an error. |
+| L-17 | INSERT ... ON CONFLICT [(columns)] DO NOTHING, and DO UPDATE SET ... [WHERE ...] with `excluded.c` for the value of the INSERT. |
+| L-18 | EXPLAIN before a statement shows its plan instead of running it. |
+| L-19 | A file that holds DEFAULT or CHECK has format version 2. A file without them stays version 1, which v0.2.0 reads. v0.3 reads both (I-3), and v0.2.0 refuses version 2 as an unknown format version (I-4). |
+
+Not in stage 3: views, triggers, foreign keys, window functions,
+common table expressions and UNION. They are candidates for 1.x.
