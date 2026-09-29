@@ -626,6 +626,36 @@ The oracle test makes a quarter of its random queries joins: INNER and
 LEFT, three tables, a range in ON, and a table with itself. Each one
 also runs without a plan, and both must agree with SQLite.
 
+## Sessions and the driver
+
+A Session runs SQL text as the connection of a client does. BEGIN,
+COMMIT and ROLLBACK start and end a transaction of the session.
+Outside one, each statement is a transaction of its own, as in SQLite.
+So a text of three statements, of which the second fails, keeps the
+first. BeginRead starts a read-only transaction on a snapshot, which
+never waits.
+
+The package `sqldriver` is the driver for `database/sql` (L-11). Each
+connection is a Session. The pool opens several connections, but a
+file of datumujo is open once per process. So the connections of all
+`sql.DB` of one file share one open database, with a count of their
+users; the last Close releases the file. A program that has the
+database open already passes it to `NewConnector`.
+
+| Case | Rule |
+|---|---|
+| a transaction that BEGIN in the text left open | ends when the connection goes back to the pool or is closed; the next user does not get it |
+| `TxOptions.ReadOnly` | a read-only transaction; a write is an error |
+| a level of isolation | served by a serializable transaction (T-1), the strongest |
+| a named argument | an error: use `?` or `?N` |
+| a context | checked before a statement starts, not while it runs |
+| the type of a result column | `DatabaseTypeName` gives INTEGER, REAL and so on, or "" when only the run knows it |
+
+One write transaction runs at a time. A second one waits, also on
+another connection of the pool; readers never wait. A test runs four
+writers and four readers on a pool of four connections under the race
+detector.
+
 ## Counters
 
 A counter is a number in the catalog tree, stored with the rows of the

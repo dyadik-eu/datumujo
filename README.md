@@ -9,6 +9,62 @@ secondary and unique indexes, scans and counters. One writer runs while
 readers never wait, and there are backup and a check command. A subset of SQL is the second stage.
 The API and the file format can still change before v1.
 
+## Use
+
+SQL through `database/sql`, with the driver of this module. The code
+below runs as `Example` in `sqldriver/example_test.go`, and its output
+is checked there.
+
+```go
+import (
+	"database/sql"
+
+	_ "github.com/dyadik-eu/datumujo/sqldriver"
+)
+```
+
+```go
+dir, _ := os.MkdirTemp("", "datumujo")
+defer os.RemoveAll(dir)
+db, err := sql.Open("datumujo", filepath.Join(dir, "forge.db"))
+if err != nil {
+	panic(err)
+}
+defer db.Close()
+if _, err := db.Exec(`CREATE TABLE issue (id INTEGER PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL)`); err != nil {
+	panic(err)
+}
+tx, err := db.Begin()
+if err != nil {
+	panic(err)
+}
+for _, title := range []string{"crash on start", "typo in README"} {
+	if _, err := tx.Exec("INSERT INTO issue (title, state) VALUES (?, 'open')", title); err != nil {
+		panic(err)
+	}
+}
+if err := tx.Commit(); err != nil {
+	panic(err)
+}
+rows, err := db.Query("SELECT id, title FROM issue WHERE state = ? ORDER BY id", "open")
+if err != nil {
+	panic(err)
+}
+defer rows.Close()
+for rows.Next() {
+	var id int64
+	var title string
+	if err := rows.Scan(&id, &title); err != nil {
+		panic(err)
+	}
+	fmt.Println(id, title)
+}
+```
+
+The typed Go API of stage 1 and the SQL of stage 2 work on the same
+file. The SQL, and each difference to SQLite, is in
+[docs/requirements.md](docs/requirements.md).
+
 ## Goals
 
 - One database file, used in the process of the program. There is no server.
