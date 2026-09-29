@@ -2,6 +2,7 @@ package sqlparse
 
 import (
 	"errors"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -151,6 +152,9 @@ var statements = []struct{ src, want string }{
 	{"CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, x REAL NULL, b BOOL, d BLOB, at TIMESTAMP, f DOUBLE PRECISION)",
 		"CREATE TABLE IF NOT EXISTS t (id INTEGER, x REAL, b BOOLEAN, d BLOB, at TIMESTAMP, f REAL, PRIMARY KEY (id))"},
 	{"CREATE TABLE key (index INTEGER, text TEXT)", `CREATE TABLE "key" ("index" INTEGER, text TEXT)`},
+	{"create table d (default integer default -5 not null, current_timestamp timestamp null default current_timestamp, s text default 'it''s', b blob default x'00ff', r real default +1e3, n int default null, t bool default true)",
+		`CREATE TABLE d ("default" INTEGER NOT NULL DEFAULT -5, "current_timestamp" TIMESTAMP DEFAULT CURRENT_TIMESTAMP, s TEXT DEFAULT 'it''s', b BLOB DEFAULT X'00ff', r REAL DEFAULT 1000.0, n INTEGER DEFAULT NULL, t BOOLEAN DEFAULT TRUE)`},
+	{"ALTER TABLE t ADD c REAL NOT NULL DEFAULT -0.0", "ALTER TABLE t ADD COLUMN c REAL NOT NULL DEFAULT -0.0"},
 	{"CREATE UNIQUE INDEX by_name ON account (name)", "CREATE UNIQUE INDEX by_name ON account (name)"},
 	{"create index if not exists s on issue(repo, state)", "CREATE INDEX IF NOT EXISTS s ON issue (repo, state)"},
 	{"DROP TABLE issue", "DROP TABLE issue"},
@@ -238,6 +242,13 @@ func TestErrors(t *testing.T) {
 		{"CREATE TABLE t (a INTEGER PRIMARY KEY PRIMARY KEY)", 1, 39, "PRIMARY KEY twice"},
 		{"CREATE TABLE if (a INTEGER)", 1, 17, "want NOT"},
 		{"ALTER TABLE t ADD COLUMN a INTEGER PRIMARY KEY", 1, 36, "cannot be part of the primary key"},
+		{"CREATE TABLE t (a INTEGER DEFAULT 1 DEFAULT 2)", 1, 37, "column a: DEFAULT twice"},
+		{"CREATE TABLE t (a INTEGER DEFAULT (1))", 1, 35, "(, want a constant or CURRENT_TIMESTAMP after DEFAULT"},
+		{"CREATE TABLE t (a INTEGER DEFAULT b)", 1, 35, "want a constant or CURRENT_TIMESTAMP"},
+		{"CREATE TABLE t (a INTEGER DEFAULT ?)", 1, 35, "want a constant or CURRENT_TIMESTAMP"},
+		{"CREATE TABLE t (a INTEGER DEFAULT - 'x')", 1, 37, "want a number after the sign of a DEFAULT"},
+		{"CREATE TABLE t (a INTEGER DEFAULT -9223372036854775809)", 1, 36, "out of the range of INTEGER"},
+		{"CREATE TABLE t (a INTEGER DEFAULT)", 1, 34, "), want a constant"},
 		{"INSERT INTO t VALUES ()", 1, 23, "want an expression"},
 		{"UPDATE t SET a", 1, 15, "want ="},
 		{"SELECT a NOT 1", 1, 14, "want IN, BETWEEN or LIKE after NOT"},
@@ -303,6 +314,37 @@ func TestDepth(t *testing.T) {
 	}
 }
 
+// TestParseDefault reads back what Default.String writes, as the schema
+// keeps it, and refuses text that is more than one default.
+func TestParseDefault(t *testing.T) {
+	for _, d := range []*Default{
+		{Value: int64(math.MinInt64)}, {Value: int64(7)}, {Value: math.Copysign(0, -1)},
+		{Value: 1e300}, {Value: 0.1}, {Value: "it's"}, {Value: []byte{}}, {Value: []byte{0, 255}},
+		{Value: true}, {Value: false}, {}, {Now: true},
+	} {
+		text := d.String()
+		got, err := ParseDefault(text)
+		if err != nil {
+			t.Errorf("%s: %v", text, err)
+			continue
+		}
+		strip(reflect.ValueOf(got))
+		if !reflect.DeepEqual(got, d) || math.Signbit(toFloat(got.Value)) != math.Signbit(toFloat(d.Value)) {
+			t.Errorf("%s reads back as %#v, want %#v", text, got, d)
+		}
+	}
+	for _, text := range []string{"", "1 2", "(1)", "1 + 1", "CURRENT_TIMESTAMP()", "x"} {
+		if d, err := ParseDefault(text); err == nil {
+			t.Errorf("%q reads as %v", text, d)
+		}
+	}
+}
+
+func toFloat(v any) float64 {
+	f, _ := v.(float64)
+	return f
+}
+
 func FuzzParse(f *testing.F) {
 	for _, c := range statements {
 		f.Add(c.src)
@@ -311,6 +353,7 @@ func FuzzParse(f *testing.F) {
 		"SELECT -9223372036854775808 - -1", "SELECT (- (5)), - -5.5, +1",
 		"SELECT a NOT BETWEEN -1 AND 2 IS NOT NULL", "SELECT 'a' || X'ff' || \"q\"\"x\"",
 		"SELECT CASE WHEN NOT a IN (1, ?3) THEN -0.0 END",
+		"CREATE TABLE t (a INTEGER DEFAULT -9223372036854775808, b TIMESTAMP DEFAULT current_timestamp, c BLOB DEFAULT X'')",
 	} {
 		f.Add(s)
 	}
