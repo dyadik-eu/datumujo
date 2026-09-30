@@ -16,9 +16,16 @@ the API and the file format can change in any release.
 - `Column.Default` and `Def.Checks`, with `Table.Checks`: the schema
   holds the text of a default for each column and the texts of the
   checks of a table. The Go API stores them and does not apply them; an
-  SQL INSERT applies the default.
+  SQL INSERT applies the default, and an SQL INSERT or UPDATE tests the
+  checks.
 - `Column.Fill`: the value that rows written before `AddColumn` read for
   the column. With a Fill, an added column can be NOT NULL.
+- CHECK on a column and on a table in SQL. An INSERT or UPDATE that makes
+  a check FALSE fails with `ErrCheck`; NULL passes. ALTER TABLE ADD
+  COLUMN with a CHECK tests the rows that exist. See "Checks" in
+  [docs/sql.md](docs/sql.md).
+- `AddColumn` takes checks for the table after the column, as a variadic
+  argument.
 - `datumujo check` and `Stats.FormatVersion` report the format version.
 
 ### File format

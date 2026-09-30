@@ -299,8 +299,29 @@ The rules hold in both directions:
   the file stays at version 2.
 
 The table layer stores the texts and does not read them. The SQL layer
-parses them (L-13, L-14). A fill is a value; the next section says what
-reads it.
+parses them (L-13, L-14). A fill is a value; "Defaults and fills" says
+what reads it.
+
+### Rejected: lower the version again
+
+A file could go back to version 1 when the last default or check is
+dropped. It would not help v0.2.0 at once. Open reads the header in the
+file before the log. A lowered version reaches the file only at a
+checkpoint. Until then, v0.2.0 refuses the file anyway. A version that
+only goes up is one state less to test.
+
+### Rejected: raise every file to version 2
+
+v0.3 could write version 2 into each file it opens. Nothing in such a
+file needs version 2, and v0.2.0 could no longer read it.
+
+The tests are `TestFormatVersion` and `TestExtendedSchemaInVersion1` in
+`internal/table`, and `TestFileOfV020` and `TestFileOfV2` in the root
+package. `testdata/format/v0.2.0.db` is a file that v0.2.0 wrote.
+`tests/format.test.sh` builds the tag v0.2.0 and checks that it writes
+this file again, byte for byte. It then checks that v0.2.0 reads it and
+refuses `testdata/format/v2.db`, with a positive control for the build
+of the tag.
 
 ## Defaults and fills
 
@@ -343,26 +364,32 @@ SQLite takes `DEFAULT (expr)` in CREATE TABLE and refuses it in ALTER
 TABLE. L-13 names constants and CURRENT_TIMESTAMP. A constant is checked
 against its column once; an expression could fail on a later INSERT.
 
-### Rejected: lower the version again
+## Checks
 
-A file could go back to version 1 when the last default or check is
-dropped. It would not help v0.2.0 at once. Open reads the header in the
-file before the log. A lowered version reaches the file only at a
-checkpoint. Until then, v0.2.0 refuses the file anyway. A version that
-only goes up is one state less to test.
+The schema keeps each CHECK of a table as the text that
+`sqlparse.Expr.String` writes. A check of a column and a check of the
+table end in the same list. Both may read any column of the table, as
+in SQLite. An INSERT or an UPDATE parses and compiles the
+checks of its table once, and tests each row it writes after NOT NULL.
+A FALSE fails the statement with ErrCheck; the savepoint of the
+statement takes back the rows it wrote before. NULL passes, as in SQL.
 
-### Rejected: raise every file to version 2
+A check is compiled when the table or column is made. It must be
+BOOLEAN, and the same row must give the same answer each time: no
+parameter and no aggregate. So a check that could never run is an error
+at once, not on the first row. A check that the schema holds and that
+does not compile is damage; the first statement that writes the table
+reports it.
 
-v0.3 could write version 2 into each file it opens. Nothing in such a
-file needs version 2, and v0.2.0 could no longer read it.
+ALTER TABLE ADD COLUMN with a CHECK tests the rows that exist, with the
+fill of the new column, as SQLite does. It reads the table once. A FALSE
+fails the statement, and its savepoint takes the column back.
 
-The tests are `TestFormatVersion` and `TestExtendedSchemaInVersion1` in
-`internal/table`, and `TestFileOfV020` and `TestFileOfV2` in the root
-package. `testdata/format/v0.2.0.db` is a file that v0.2.0 wrote.
-`tests/format.test.sh` builds the tag v0.2.0 and checks that it writes
-this file again, byte for byte. It then checks that v0.2.0 reads it and
-refuses `testdata/format/v2.db`, with a positive control for the build
-of the tag.
+### Rejected: test the rows that exist only against the fill
+
+A check of an added column can read the other columns, so the fill
+alone does not answer it. The scan costs a read of the table, and no
+write.
 
 ## Indexes
 
