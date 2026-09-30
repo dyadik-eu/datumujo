@@ -2,7 +2,7 @@
 
 This is the SQL of stage 2 and of the parts of stage 3 that are done.
 It says what the SQL has, how its values behave, and its limits. The requirements are
-L-1 to L-12, and L-13 for DEFAULT, in [requirements.md](requirements.md). Each difference to SQLite is in the
+L-1 to L-12, L-13 for DEFAULT and L-14 for CHECK, in [requirements.md](requirements.md). Each difference to SQLite is in the
 oracle table there. How the parts work is in [design.md](design.md).
 
 ## Where SQL runs
@@ -22,11 +22,12 @@ An error is a `*SQLError` with the line and the column in the text.
 ## Statements
 
 ```sql
-CREATE TABLE [IF NOT EXISTS] t (c TYPE [NOT NULL] [PRIMARY KEY] [DEFAULT d], ..., [PRIMARY KEY (c, ...)])
+CREATE TABLE [IF NOT EXISTS] t (c TYPE [NOT NULL] [PRIMARY KEY] [DEFAULT d] [CHECK (e)], ...,
+  [PRIMARY KEY (c, ...)], [CHECK (e)], ...)
 CREATE [UNIQUE] INDEX [IF NOT EXISTS] i ON t (c, ...)
 DROP TABLE [IF EXISTS] t
 DROP INDEX [IF EXISTS] i
-ALTER TABLE t ADD [COLUMN] c TYPE [NOT NULL] [DEFAULT d]
+ALTER TABLE t ADD [COLUMN] c TYPE [NOT NULL] [DEFAULT d] [CHECK (e)]
 INSERT INTO t [(c, ...)] VALUES (e, ...), ...
 UPDATE t SET c = e, ... [WHERE e]
 DELETE FROM t [WHERE e]
@@ -75,6 +76,38 @@ rows are not rewritten.
 
 The first default makes the file format version 2, which v0.2.0 does
 not open.
+
+## Checks
+
+A CHECK on a column or on the table is a BOOLEAN of the columns of the
+table. A check of a column can read the other columns too. An INSERT or
+UPDATE fails when a check is FALSE for a row it writes, and it then
+changes no row. NULL passes. The error matches `ErrCheck`.
+
+```sql
+CREATE TABLE issue (
+  id INTEGER PRIMARY KEY,
+  votes INTEGER NOT NULL DEFAULT 0 CHECK (votes >= 0),
+  opened TIMESTAMP,
+  closed TIMESTAMP,
+  CHECK (closed >= opened)
+)
+```
+
+With this table, `UPDATE issue SET votes = -1` fails:
+`CHECK ((votes >= 0)) of table issue is false`. A row with `opened` or
+`closed` NULL passes the check of the table.
+
+A check must be BOOLEAN, and it takes no parameter and no aggregate.
+Otherwise the table is not made. An error inside a check, such as a
+division by zero, is an error of the statement.
+
+ALTER TABLE ADD COLUMN with a CHECK tests the rows that exist, with the
+default of the new column. A FALSE fails the statement, and the column
+is not added. A check can have no name: `CONSTRAINT name` is not in the
+SQL.
+
+The first check makes the file format version 2, as a default does.
 
 ## Types
 
@@ -185,6 +218,7 @@ byte more in an index.
 ## Not in stage 2
 
 Subqueries, common table expressions, views, triggers, foreign keys,
-CHECK, window functions, UNION, NATURAL and USING joins, upsert, a
-DEFAULT that is an expression, and `INSERT ... DEFAULT VALUES`. The roadmap to v1.0 in [roadmap.md](roadmap.md) says which of
+window functions, UNION, NATURAL and USING joins, upsert, a DEFAULT
+that is an expression, `INSERT ... DEFAULT VALUES`, and `CONSTRAINT`
+with a name. The roadmap to v1.0 in [roadmap.md](roadmap.md) says which of
 them come when.

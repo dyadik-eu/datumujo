@@ -156,6 +156,10 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | `DEFAULT (expr)` | allowed in CREATE TABLE | error: a constant or CURRENT_TIMESTAMP |
 | `DEFAULT CURRENT_TIMESTAMP` | TEXT to the second | a TIMESTAMP to the nanosecond, in UTC, and only for a TIMESTAMP column; not in oracle tests |
 | `INSERT ... DEFAULT VALUES` | the defaults of all columns | not in the SQL |
+| `CHECK (a)` for an INTEGER `a` | the number as true or false | error when the table is made: CHECK needs BOOLEAN |
+| `CHECK (NULL)` | each row passes | error when the table is made: NULL has no type |
+| an error inside a CHECK, such as `10 / 0` | NULL, so the row passes | error of the statement |
+| `CONSTRAINT name CHECK (...)` | a named check | not in the SQL |
 | a column neither in GROUP BY nor in an aggregate | the value of some row of the group | error |
 | `sum` or `avg` of TEXT or BOOLEAN | the values as numbers: 'a' is 0, TRUE is 1 | error: they need INTEGER or REAL |
 | `sum` of REAL past float64 | Inf | error: REAL overflow |

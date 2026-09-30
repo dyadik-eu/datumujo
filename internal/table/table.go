@@ -225,8 +225,10 @@ func (tx *Tx) CreateTable(d Def) error {
 
 // AddColumn adds a column at the end of a table. The rows written before
 // read its Fill, or null without one. So it must allow null or have a
-// Fill. No row is rewritten.
-func (tx *Tx) AddColumn(table string, c Column) error {
+// Fill. No row is rewritten. checks are added to the checks of the
+// table; this package keeps them and does not test the rows against
+// them.
+func (tx *Tx) AddColumn(table string, c Column, checks ...string) error {
 	if !c.Null && c.Fill == nil {
 		return schemaErr("table %s: added column %s must allow null or have a fill", table, c.Name)
 	}
@@ -236,6 +238,7 @@ func (tx *Tx) AddColumn(table string, c Column) error {
 	s := tx.copySchema()
 	t, _ := s.Table(table)
 	t.Columns = append(t.Columns, c)
+	t.Checks = append(t.Checks, checks...)
 	if err := t.check(); err != nil {
 		return err
 	}

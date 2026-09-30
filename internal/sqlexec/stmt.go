@@ -195,6 +195,19 @@ func createTable(tx *table.Tx, s *sqlparse.CreateTable) error {
 		}
 		d.Columns = append(d.Columns, col)
 	}
+	// A check of a column can read the other columns, as in SQLite, so
+	// each compiles against the whole table.
+	whole := &table.Table{Name: s.Name, Columns: d.Columns}
+	checks := s.Checks
+	for _, c := range s.Columns {
+		checks = append(checks[:len(checks):len(checks)], c.Checks...)
+	}
+	for _, e := range checks {
+		if _, err := compileCheck(whole, e); err != nil {
+			return err
+		}
+		d.Checks = append(d.Checks, e.String())
+	}
 	return engineErr(s.At, tx.CreateTable(d))
 }
 
@@ -262,7 +275,42 @@ func addColumn(tx *table.Tx, s *sqlparse.AddColumn) error {
 	} else if !col.Null {
 		return errAt(c.At, "column %s: an added column NOT NULL needs a DEFAULT; the rows that exist have no value for it", c.Name)
 	}
-	return engineErr(s.At, tx.AddColumn(s.Table, col))
+	whole := &table.Table{Name: t.Name, Columns: append(t.Columns[:len(t.Columns):len(t.Columns)], col)}
+	var texts []string
+	for _, e := range c.Checks {
+		if _, err := compileCheck(whole, e); err != nil {
+			return err
+		}
+		texts = append(texts, e.String())
+	}
+	if err := tx.AddColumn(s.Table, col, texts...); err != nil {
+		return engineErr(s.At, err)
+	}
+	return checkRows(tx, s.Table, texts, s.At)
+}
+
+// checkRows tests every row of a table against new checks, as SQLite
+// does when ALTER TABLE adds a column with a CHECK. A FALSE fails the
+// statement, and its savepoint takes the column back.
+func checkRows(tx *table.Tx, name string, texts []string, at sqlparse.At) error {
+	if len(texts) == 0 {
+		return nil
+	}
+	t, _ := tx.Schema().Table(name)
+	cs, err := checksOf(t, texts)
+	if err != nil {
+		return err
+	}
+	rows, err := tx.Scan(name, table.Options{})
+	if err != nil {
+		return engineErr(at, err)
+	}
+	for rows.Next() {
+		if err := checkRow(t, cs, rows.Row(), at); err != nil {
+			return err
+		}
+	}
+	return engineErr(at, rows.Err())
 }
 
 // assignable reports whether a value of type from can go into a column
@@ -390,6 +438,10 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	cs, err := checksOf(t, t.Checks)
+	if err != nil {
+		return Result{}, err
+	}
 	var res Result
 	auto, hasAuto := autoKey(t)
 	for i, targets := range rows {
@@ -407,6 +459,9 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any) (Result, error) {
 			}
 		}
 		if err := checkNull(t, row, at); err != nil {
+			return Result{}, err
+		}
+		if err := checkRow(t, cs, row, at); err != nil {
 			return Result{}, err
 		}
 		if err := tx.Insert(t.Name, row); err != nil {
@@ -533,6 +588,10 @@ func update(tx *table.Tx, s *sqlparse.Update, params []any, lim Limits) (Result,
 	if err != nil {
 		return Result{}, err
 	}
+	cs, err := checksOf(t, t.Checks)
+	if err != nil {
+		return Result{}, err
+	}
 	var scanned int64
 	old, err := matching(tx, t, w, s.Where, s.At, params, lim, &scanned)
 	if err != nil {
@@ -548,6 +607,9 @@ func update(tx *table.Tx, s *sqlparse.Update, params []any, lim Limits) (Result,
 			}
 		}
 		if err := checkNull(t, n, s.At); err != nil {
+			return Result{}, err
+		}
+		if err := checkRow(t, cs, n, s.At); err != nil {
 			return Result{}, err
 		}
 		news[i] = n
