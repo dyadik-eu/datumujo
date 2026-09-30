@@ -631,6 +631,32 @@ func TestFill(t *testing.T) {
 	}
 }
 
+// TestAddColumnChecks: AddColumn appends its checks to those of the
+// table, which raises the file to format version 2. An empty check is
+// refused, and the table stays as it was.
+func TestAddColumnChecks(t *testing.T) {
+	s := openStore(t, vfs.NewSim())
+	defer s.Close()
+	stx, tx := begin(t, s)
+	defer stx.Rollback()
+	if err := tx.CreateTable(Def{Name: "t", Columns: []Column{{Name: "k", Type: Int64}}, Key: []string{"k"}, Checks: []string{"k > 0"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.AddColumn("t", Column{Name: "a", Type: Int64, Null: true}, ""); !errors.Is(err, ErrSchema) {
+		t.Errorf("an empty check: %v", err)
+	}
+	if err := tx.AddColumn("t", Column{Name: "a", Type: Int64, Null: true}, "a < 5", "a <> 2"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := tx.Schema().Table("t")
+	if strings.Join(got.Checks, "; ") != "k > 0; a < 5; a <> 2" || len(got.Columns) != 2 {
+		t.Errorf("t: %+v", got)
+	}
+	if stx.Version() != 2 {
+		t.Errorf("format version %d", stx.Version())
+	}
+}
+
 // TestExtendedSchemaInVersion1 opens a file of format version 1 whose
 // schema holds a check. The code never writes one, so it is damage.
 func TestExtendedSchemaInVersion1(t *testing.T) {

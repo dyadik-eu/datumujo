@@ -63,6 +63,8 @@ var (
 	// ErrQueryMemory means that a SQL statement would hold more rows in
 	// memory than Options.QueryMemory allows.
 	ErrQueryMemory = sqlexec.ErrMemory
+	// ErrCheck means that a row makes a CHECK of its table false.
+	ErrCheck = sqlexec.ErrCheck
 	// ErrCheckpoint means that a commit is durable and the checkpoint
 	// after it failed. The data is safe; the log grows until a checkpoint
 	// works.
