@@ -138,13 +138,15 @@ func (*Cast) expr()      {}
 func (*Case) expr()      {}
 
 // ColumnDef is a column of CREATE TABLE or ALTER TABLE ADD COLUMN.
-// Default is nil without DEFAULT.
+// Default is nil without DEFAULT. Checks are the CHECK conditions of the
+// column, in order.
 type ColumnDef struct {
 	At
 	Name    string
 	Type    string
 	NotNull bool
 	Default *Default
+	Checks  []Expr
 }
 
 // Default is the DEFAULT of a column: a constant, or CURRENT_TIMESTAMP.
@@ -158,12 +160,14 @@ type Default struct {
 
 // CreateTable is CREATE TABLE. A PRIMARY KEY on a column and a PRIMARY
 // KEY (...) of the table both end in Key. Key is empty without one.
+// Checks are the CHECK conditions of the table, not of a column.
 type CreateTable struct {
 	At
 	Name        string
 	IfNotExists bool
 	Columns     []ColumnDef
 	Key         []string
+	Checks      []Expr
 }
 
 // CreateIndex is CREATE [UNIQUE] INDEX.

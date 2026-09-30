@@ -294,7 +294,15 @@ func (p *parser) create() (Statement, error) {
 		return nil
 	}
 	for {
-		if p.isKw("PRIMARY") {
+		// CHECK ( starts a check of the table. A column called check
+		// has a type after its name, never (.
+		if p.isWord("check") && p.peek().kind == tOp && p.peek().text == "(" {
+			e, err := p.check()
+			if err != nil {
+				return nil, err
+			}
+			ct.Checks = append(ct.Checks, e)
+		} else if p.isKw("PRIMARY") {
 			at := p.tok.at
 			if err := p.advance(); err != nil {
 				return nil, err
@@ -334,8 +342,9 @@ func (p *parser) create() (Statement, error) {
 	return ct, p.expectOp(")")
 }
 
-// columnDef reads name type [NOT NULL | NULL | PRIMARY KEY | DEFAULT d]
-// .... It returns the position of PRIMARY KEY if the column has it.
+// columnDef reads name type [NOT NULL | NULL | PRIMARY KEY | DEFAULT d |
+// CHECK (e)] .... It returns the position of PRIMARY KEY if the column
+// has it.
 func (p *parser) columnDef() (ColumnDef, *At, error) {
 	c := ColumnDef{At: p.tok.at}
 	var err error
@@ -382,10 +391,48 @@ func (p *parser) columnDef() (ColumnDef, *At, error) {
 			if c.Default, err = p.defaultValue(); err != nil {
 				return c, nil, err
 			}
+		case p.isWord("check"):
+			e, err := p.check()
+			if err != nil {
+				return c, nil, err
+			}
+			c.Checks = append(c.Checks, e)
 		default:
 			return c, pk, nil
 		}
 	}
+}
+
+// check reads CHECK (e) and returns e.
+func (p *parser) check() (Expr, error) {
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+	if err := p.expectOp("("); err != nil {
+		return nil, err
+	}
+	e, err := p.expr()
+	if err != nil {
+		return nil, err
+	}
+	return e, p.expectOp(")")
+}
+
+// ParseExpr reads one expression, as Expr.String writes it. The schema
+// keeps a CHECK as this text.
+func ParseExpr(src string) (Expr, error) {
+	p := &parser{lx: lexer{src: src, line: 1, col: 1}}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+	e, err := p.expr()
+	if err != nil {
+		return nil, err
+	}
+	if p.tok.kind != tEOF {
+		return nil, p.unexpected("the end of the expression")
+	}
+	return e, nil
 }
 
 // defaultValue reads the value after DEFAULT: a number with an optional

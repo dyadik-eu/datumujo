@@ -155,6 +155,9 @@ var statements = []struct{ src, want string }{
 	{"create table d (default integer default -5 not null, current_timestamp timestamp null default current_timestamp, s text default 'it''s', b blob default x'00ff', r real default +1e3, n int default null, t bool default true)",
 		`CREATE TABLE d ("default" INTEGER NOT NULL DEFAULT -5, "current_timestamp" TIMESTAMP DEFAULT CURRENT_TIMESTAMP, s TEXT DEFAULT 'it''s', b BLOB DEFAULT X'00ff', r REAL DEFAULT 1000.0, n INTEGER DEFAULT NULL, t BOOLEAN DEFAULT TRUE)`},
 	{"ALTER TABLE t ADD c REAL NOT NULL DEFAULT -0.0", "ALTER TABLE t ADD COLUMN c REAL NOT NULL DEFAULT -0.0"},
+	{"create table c (check integer check (check > 0) check(check < 9), b text, check (length(b) < check), primary key (check))",
+		`CREATE TABLE c ("check" INTEGER CHECK (("check" > 0)) CHECK (("check" < 9)), b TEXT, PRIMARY KEY ("check"), CHECK ((length(b) < "check")))`},
+	{"ALTER TABLE t ADD COLUMN n INTEGER DEFAULT 1 CHECK (n BETWEEN 0 AND 5)", "ALTER TABLE t ADD COLUMN n INTEGER DEFAULT 1 CHECK ((n BETWEEN 0 AND 5))"},
 	{"CREATE UNIQUE INDEX by_name ON account (name)", "CREATE UNIQUE INDEX by_name ON account (name)"},
 	{"create index if not exists s on issue(repo, state)", "CREATE INDEX IF NOT EXISTS s ON issue (repo, state)"},
 	{"DROP TABLE issue", "DROP TABLE issue"},
@@ -243,6 +246,10 @@ func TestErrors(t *testing.T) {
 		{"CREATE TABLE if (a INTEGER)", 1, 17, "want NOT"},
 		{"ALTER TABLE t ADD COLUMN a INTEGER PRIMARY KEY", 1, 36, "cannot be part of the primary key"},
 		{"CREATE TABLE t (a INTEGER DEFAULT 1 DEFAULT 2)", 1, 37, "column a: DEFAULT twice"},
+		{"CREATE TABLE t (a INTEGER CHECK a > 0)", 1, 33, "a, want ("},
+		{"CREATE TABLE t (a INTEGER CHECK (a >))", 1, 37, "want an expression"},
+		{"CREATE TABLE t (a INTEGER, CHECK (a > 0)", 1, 41, "want )"},
+		{"CREATE TABLE t (a INTEGER, CHECK)", 1, 33, "want a type"},
 		{"CREATE TABLE t (a INTEGER DEFAULT (1))", 1, 35, "(, want a constant or CURRENT_TIMESTAMP after DEFAULT"},
 		{"CREATE TABLE t (a INTEGER DEFAULT b)", 1, 35, "want a constant or CURRENT_TIMESTAMP"},
 		{"CREATE TABLE t (a INTEGER DEFAULT ?)", 1, 35, "want a constant or CURRENT_TIMESTAMP"},
@@ -340,6 +347,36 @@ func TestParseDefault(t *testing.T) {
 	}
 }
 
+// TestParseExpr reads back what Expr.String writes, as the schema keeps
+// a CHECK, and refuses text that is more than one expression.
+func TestParseExpr(t *testing.T) {
+	for _, src := range []string{
+		"a > 0", "length(b) < 3 AND c IS NOT NULL", "x BETWEEN -1 AND 2.5",
+		"CASE WHEN a THEN 'x' ELSE NULL END = 'x'", `"check" IN (1, 2)`, "NOT (a OR b)",
+	} {
+		e, err := ParseExpr(src)
+		if err != nil {
+			t.Errorf("%s: %v", src, err)
+			continue
+		}
+		again, err := ParseExpr(e.String())
+		if err != nil {
+			t.Errorf("%s printed as %s, which does not parse: %v", src, e, err)
+			continue
+		}
+		strip(reflect.ValueOf(e))
+		strip(reflect.ValueOf(again))
+		if !reflect.DeepEqual(e, again) {
+			t.Errorf("%s printed as %s, which parses to another tree", src, e)
+		}
+	}
+	for _, src := range []string{"", "a >", "a > 0 b", "a > 0;", "(a"} {
+		if e, err := ParseExpr(src); err == nil {
+			t.Errorf("%q reads as %v", src, e)
+		}
+	}
+}
+
 func toFloat(v any) float64 {
 	f, _ := v.(float64)
 	return f
@@ -354,6 +391,7 @@ func FuzzParse(f *testing.F) {
 		"SELECT a NOT BETWEEN -1 AND 2 IS NOT NULL", "SELECT 'a' || X'ff' || \"q\"\"x\"",
 		"SELECT CASE WHEN NOT a IN (1, ?3) THEN -0.0 END",
 		"CREATE TABLE t (a INTEGER DEFAULT -9223372036854775808, b TIMESTAMP DEFAULT current_timestamp, c BLOB DEFAULT X'')",
+		"CREATE TABLE t (check INTEGER CHECK (check > 0), CHECK (check < 9))",
 	} {
 		f.Add(s)
 	}

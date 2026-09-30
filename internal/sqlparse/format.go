@@ -15,7 +15,7 @@ import (
 // a word gets double quotes, so it cannot be read as the word.
 var softWords = map[string]bool{
 	"add": true, "begin": true, "column": true, "commit": true, "exists": true,
-	"current_timestamp": true, "default": true,
+	"check": true, "current_timestamp": true, "default": true,
 	"if": true, "index": true, "key": true, "rollback": true, "transaction": true,
 	"precision": true,
 }
@@ -160,6 +160,9 @@ func (c ColumnDef) String() string {
 	if c.Default != nil {
 		s += " DEFAULT " + c.Default.String()
 	}
+	for _, e := range c.Checks {
+		s += " CHECK (" + e.String() + ")"
+	}
 	return s
 }
 
@@ -191,6 +194,9 @@ func (s *CreateTable) String() string {
 	}
 	if len(s.Key) > 0 {
 		parts = append(parts, "PRIMARY KEY ("+names(s.Key)+")")
+	}
+	for _, e := range s.Checks {
+		parts = append(parts, "CHECK ("+e.String()+")")
 	}
 	return "CREATE TABLE " + ifNotExists(s.IfNotExists) + Name(s.Name) + " (" + strings.Join(parts, ", ") + ")"
 }
