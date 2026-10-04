@@ -26,6 +26,9 @@ the API and the file format can change in any release.
   [docs/sql.md](docs/sql.md).
 - `AddColumn` takes checks for the table after the column, as a variadic
   argument.
+- UNIQUE on a column and on a table in SQL. Each is a unique index
+  called `<table>_unique_<n>`; an INSERT or UPDATE that breaks it fails
+  with `ErrUnique`. See "Unique" in [docs/sql.md](docs/sql.md).
 - `datumujo check` and `Stats.FormatVersion` report the format version.
 
 ### File format

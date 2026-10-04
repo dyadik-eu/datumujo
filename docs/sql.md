@@ -2,7 +2,7 @@
 
 This is the SQL of stage 2 and of the parts of stage 3 that are done.
 It says what the SQL has, how its values behave, and its limits. The requirements are
-L-1 to L-12, L-13 for DEFAULT and L-14 for CHECK, in [requirements.md](requirements.md). Each difference to SQLite is in the
+L-1 to L-12, L-13 for DEFAULT, L-14 for CHECK and L-15 for UNIQUE, in [requirements.md](requirements.md). Each difference to SQLite is in the
 oracle table there. How the parts work is in [design.md](design.md).
 
 ## Where SQL runs
@@ -22,8 +22,8 @@ An error is a `*SQLError` with the line and the column in the text.
 ## Statements
 
 ```sql
-CREATE TABLE [IF NOT EXISTS] t (c TYPE [NOT NULL] [PRIMARY KEY] [DEFAULT d] [CHECK (e)], ...,
-  [PRIMARY KEY (c, ...)], [CHECK (e)], ...)
+CREATE TABLE [IF NOT EXISTS] t (c TYPE [NOT NULL] [PRIMARY KEY] [UNIQUE] [DEFAULT d] [CHECK (e)], ...,
+  [PRIMARY KEY (c, ...)], [UNIQUE (c, ...)], ..., [CHECK (e)], ...)
 CREATE [UNIQUE] INDEX [IF NOT EXISTS] i ON t (c, ...)
 DROP TABLE [IF EXISTS] t
 DROP INDEX [IF EXISTS] i
@@ -108,6 +108,36 @@ is not added. A check can have no name: `CONSTRAINT name` is not in the
 SQL.
 
 The first check makes the file format version 2, as a default does.
+
+## Unique
+
+UNIQUE on a column, or UNIQUE (c, ...) on the table, allows no two rows
+with the same values in those columns. A row with NULL in one of them
+never conflicts. The INSERT or UPDATE that breaks the rule fails with
+`ErrUnique` and changes no row.
+
+```sql
+CREATE TABLE member (
+  id INTEGER PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  team INTEGER,
+  seat INTEGER,
+  UNIQUE (team, seat)
+)
+```
+
+With this table, a second row with team 1 and seat 1 fails. Two rows
+with team 1 and seat NULL do not.
+
+Each UNIQUE is a unique index of the table, called `<table>_unique_<n>`
+with the first n that no index and no table has. The name shows in
+`datumujo check`, and DROP INDEX drops the index and its rule. A UNIQUE
+over the columns of the primary key, or over the columns of an earlier
+UNIQUE in any order, makes no second index.
+
+A UNIQUE names columns of the statement, each once. ALTER TABLE ADD
+COLUMN takes no UNIQUE; add the column, then CREATE UNIQUE INDEX on it.
+UNIQUE keeps the file at format version 1, which v0.2.0 reads.
 
 ## Types
 
@@ -205,6 +235,7 @@ first that does not fails. The tests are `TestLimits` in
 | indexes of a table | 64 |
 | the key form of a primary key | 1000 bytes at a page size of 4096; a TEXT key of 998 bytes |
 | an index entry | 1000 bytes: the index columns, then the key |
+| the name of the index of a UNIQUE | 255 bytes, so a table name of at most 245 bytes for `_unique_1` |
 | a value outside a key | no limit of its own; the changes of a transaction are at most `Options.MaxTxBytes`, 16 MiB by default |
 | the rows a statement holds to sort, group or change | `Options.QueryMemory`, 64 MiB by default |
 | nesting of expressions | 200 levels |
