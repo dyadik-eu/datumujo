@@ -158,6 +158,9 @@ var statements = []struct{ src, want string }{
 	{"create table c (check integer check (check > 0) check(check < 9), b text, check (length(b) < check), primary key (check))",
 		`CREATE TABLE c ("check" INTEGER CHECK (("check" > 0)) CHECK (("check" < 9)), b TEXT, PRIMARY KEY ("check"), CHECK ((length(b) < "check")))`},
 	{"ALTER TABLE t ADD COLUMN n INTEGER DEFAULT 1 CHECK (n BETWEEN 0 AND 5)", "ALTER TABLE t ADD COLUMN n INTEGER DEFAULT 1 CHECK ((n BETWEEN 0 AND 5))"},
+	{"create table u (id integer primary key, a text unique not null, b int, c int, unique (b, c), unique(a), check (b > 0))",
+		"CREATE TABLE u (id INTEGER, a TEXT NOT NULL UNIQUE, b INTEGER, c INTEGER, PRIMARY KEY (id), UNIQUE (b, c), UNIQUE (a), CHECK ((b > 0)))"},
+	{"ALTER TABLE t ADD COLUMN u TEXT UNIQUE", "ALTER TABLE t ADD COLUMN u TEXT UNIQUE"},
 	{"CREATE UNIQUE INDEX by_name ON account (name)", "CREATE UNIQUE INDEX by_name ON account (name)"},
 	{"create index if not exists s on issue(repo, state)", "CREATE INDEX IF NOT EXISTS s ON issue (repo, state)"},
 	{"DROP TABLE issue", "DROP TABLE issue"},
@@ -247,6 +250,9 @@ func TestErrors(t *testing.T) {
 		{"ALTER TABLE t ADD COLUMN a INTEGER PRIMARY KEY", 1, 36, "cannot be part of the primary key"},
 		{"CREATE TABLE t (a INTEGER DEFAULT 1 DEFAULT 2)", 1, 37, "column a: DEFAULT twice"},
 		{"CREATE TABLE t (a INTEGER CHECK a > 0)", 1, 33, "a, want ("},
+		{"CREATE TABLE t (a INTEGER UNIQUE UNIQUE)", 1, 34, "column a: UNIQUE twice"},
+		{"CREATE TABLE t (a INTEGER, UNIQUE a)", 1, 35, "a, want ("},
+		{"CREATE TABLE t (a INTEGER, UNIQUE ())", 1, 36, "want a column name"},
 		{"CREATE TABLE t (a INTEGER CHECK (a >))", 1, 37, "want an expression"},
 		{"CREATE TABLE t (a INTEGER, CHECK (a > 0)", 1, 41, "want )"},
 		{"CREATE TABLE t (a INTEGER, CHECK)", 1, 33, "want a type"},
@@ -392,6 +398,7 @@ func FuzzParse(f *testing.F) {
 		"SELECT CASE WHEN NOT a IN (1, ?3) THEN -0.0 END",
 		"CREATE TABLE t (a INTEGER DEFAULT -9223372036854775808, b TIMESTAMP DEFAULT current_timestamp, c BLOB DEFAULT X'')",
 		"CREATE TABLE t (check INTEGER CHECK (check > 0), CHECK (check < 9))",
+		"CREATE TABLE t (a INTEGER UNIQUE, b TEXT, UNIQUE (a, b), UNIQUE (b))",
 	} {
 		f.Add(s)
 	}

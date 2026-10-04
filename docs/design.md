@@ -391,6 +391,26 @@ A check of an added column can read the other columns, so the fill
 alone does not answer it. The scan costs a read of the table, and no
 write.
 
+## Unique
+
+Each UNIQUE of CREATE TABLE becomes a unique index of the new table. The
+table layer has kept unique indexes since stage 1, with the rule that a
+NULL never conflicts. So UNIQUE adds no code to the write path and no
+field to the schema. A file with UNIQUE alone stays at format version 1.
+
+The index is called `<table>_unique_<n>`, with the first n from 1 that
+no index and no table has. Some UNIQUE make no index, since the rows
+they allow are the same. That is a UNIQUE over the columns of the key,
+and one over the columns of an earlier UNIQUE, in any order.
+
+### Rejected: a mark for the index of a UNIQUE
+
+SQLite refuses DROP INDEX on the index of a UNIQUE and reserves the
+prefix `sqlite_autoindex_` for these names. Both need a mark in the
+schema or a reserved name. A mark would raise the file to version 2 for
+UNIQUE alone. A reserved prefix would make index names that v0.2.0 takes
+an error. So the index is a plain one, and DROP INDEX drops its rule.
+
 ## Indexes
 
 An index is a tree of its own. The key of an entry is the index columns of

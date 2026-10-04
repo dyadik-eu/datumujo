@@ -160,6 +160,9 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | `CHECK (NULL)` | each row passes | error when the table is made: NULL has no type |
 | an error inside a CHECK, such as `10 / 0` | NULL, so the row passes | error of the statement |
 | `CONSTRAINT name CHECK (...)` | a named check | not in the SQL |
+| `UNIQUE (a, a)` | taken | error when the table is made |
+| DROP INDEX on the index of a UNIQUE | error | drops the index and its rule |
+| `UNIQUE (b, a)` next to `UNIQUE (a, b)` | two indexes | one index; the rule is the same |
 | a column neither in GROUP BY nor in an aggregate | the value of some row of the group | error |
 | `sum` or `avg` of TEXT or BOOLEAN | the values as numbers: 'a' is 0, TRUE is 1 | error: they need INTEGER or REAL |
 | `sum` of REAL past float64 | Inf | error: REAL overflow |
