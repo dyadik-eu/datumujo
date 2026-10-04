@@ -157,6 +157,9 @@ func (c ColumnDef) String() string {
 	if c.NotNull {
 		s += " NOT NULL"
 	}
+	if c.Unique {
+		s += " UNIQUE"
+	}
 	if c.Default != nil {
 		s += " DEFAULT " + c.Default.String()
 	}
@@ -194,6 +197,9 @@ func (s *CreateTable) String() string {
 	}
 	if len(s.Key) > 0 {
 		parts = append(parts, "PRIMARY KEY ("+names(s.Key)+")")
+	}
+	for _, u := range s.Uniques {
+		parts = append(parts, "UNIQUE ("+names(u.Columns)+")")
 	}
 	for _, e := range s.Checks {
 		parts = append(parts, "CHECK ("+e.String()+")")

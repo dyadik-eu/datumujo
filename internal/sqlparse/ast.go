@@ -139,14 +139,23 @@ func (*Case) expr()      {}
 
 // ColumnDef is a column of CREATE TABLE or ALTER TABLE ADD COLUMN.
 // Default is nil without DEFAULT. Checks are the CHECK conditions of the
-// column, in order.
+// column, in order. Unique is set by UNIQUE on the column, and UniqueAt
+// is its place.
 type ColumnDef struct {
 	At
-	Name    string
-	Type    string
-	NotNull bool
-	Default *Default
-	Checks  []Expr
+	Name     string
+	Type     string
+	NotNull  bool
+	Unique   bool
+	UniqueAt At
+	Default  *Default
+	Checks   []Expr
+}
+
+// Unique is UNIQUE (c, ...) of a table.
+type Unique struct {
+	At
+	Columns []string
 }
 
 // Default is the DEFAULT of a column: a constant, or CURRENT_TIMESTAMP.
@@ -160,13 +169,15 @@ type Default struct {
 
 // CreateTable is CREATE TABLE. A PRIMARY KEY on a column and a PRIMARY
 // KEY (...) of the table both end in Key. Key is empty without one.
-// Checks are the CHECK conditions of the table, not of a column.
+// Uniques and Checks are the UNIQUE and CHECK of the table, not of a
+// column.
 type CreateTable struct {
 	At
 	Name        string
 	IfNotExists bool
 	Columns     []ColumnDef
 	Key         []string
+	Uniques     []Unique
 	Checks      []Expr
 }
 

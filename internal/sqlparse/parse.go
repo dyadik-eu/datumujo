@@ -302,6 +302,16 @@ func (p *parser) create() (Statement, error) {
 				return nil, err
 			}
 			ct.Checks = append(ct.Checks, e)
+		} else if p.isKw("UNIQUE") {
+			at := p.tok.at
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			cols, err := p.names("a column name")
+			if err != nil {
+				return nil, err
+			}
+			ct.Uniques = append(ct.Uniques, Unique{At: at, Columns: cols})
 		} else if p.isKw("PRIMARY") {
 			at := p.tok.at
 			if err := p.advance(); err != nil {
@@ -342,9 +352,9 @@ func (p *parser) create() (Statement, error) {
 	return ct, p.expectOp(")")
 }
 
-// columnDef reads name type [NOT NULL | NULL | PRIMARY KEY | DEFAULT d |
-// CHECK (e)] .... It returns the position of PRIMARY KEY if the column
-// has it.
+// columnDef reads name type [NOT NULL | NULL | PRIMARY KEY | UNIQUE |
+// DEFAULT d | CHECK (e)] .... It returns the position of PRIMARY KEY if
+// the column has it.
 func (p *parser) columnDef() (ColumnDef, *At, error) {
 	c := ColumnDef{At: p.tok.at}
 	var err error
@@ -381,6 +391,14 @@ func (p *parser) columnDef() (ColumnDef, *At, error) {
 				return c, nil, errAt(at, "column %s: PRIMARY KEY twice", c.Name)
 			}
 			pk = &at
+		case p.isKw("UNIQUE"):
+			if c.Unique {
+				return c, nil, errAt(at, "column %s: UNIQUE twice", c.Name)
+			}
+			c.Unique, c.UniqueAt = true, at
+			if err := p.advance(); err != nil {
+				return c, nil, err
+			}
 		case p.isWord("default"):
 			if c.Default != nil {
 				return c, nil, errAt(at, "column %s: DEFAULT twice", c.Name)
