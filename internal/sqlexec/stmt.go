@@ -208,7 +208,14 @@ func createTable(tx *table.Tx, s *sqlparse.CreateTable) error {
 		}
 		d.Checks = append(d.Checks, e.String())
 	}
-	return engineErr(s.At, tx.CreateTable(d))
+	uniques, err := uniqueSets(s, d.Key)
+	if err != nil {
+		return err
+	}
+	if err := tx.CreateTable(d); err != nil {
+		return engineErr(s.At, err)
+	}
+	return createUniques(tx, s.Name, uniques)
 }
 
 func createIndex(tx *table.Tx, s *sqlparse.CreateIndex) error {
@@ -258,6 +265,9 @@ func addColumn(tx *table.Tx, s *sqlparse.AddColumn) error {
 	}
 	t, _ := tx.Schema().Table(s.Table)
 	c := s.Column
+	if c.Unique {
+		return errAt(c.UniqueAt, "column %s: an added column cannot be UNIQUE, as in SQLite; add it, then CREATE UNIQUE INDEX on it", c.Name)
+	}
 	col := table.Column{Name: c.Name, Type: sqlTypes[c.Type], Null: !c.NotNull}
 	if c.Default != nil && c.Default.Now {
 		return errAt(c.Default.At, "column %s: an added column takes a constant default; CURRENT_TIMESTAMP has no value for the rows that exist", c.Name)
