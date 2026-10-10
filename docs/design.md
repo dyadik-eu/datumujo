@@ -411,6 +411,59 @@ schema or a reserved name. A mark would raise the file to version 2 for
 UNIQUE alone. A reserved prefix would make index names that v0.2.0 takes
 an error. So the index is a plain one, and DROP INDEX drops its rule.
 
+## Subqueries
+
+The parser reads `(SELECT ...)`, `EXISTS (SELECT ...)` and
+`x IN (SELECT ...)` as nodes that hold a Select. The engine prepares
+each as a Query of its own when it compiles the expression around it.
+The statement keeps a list of its subqueries, and each run of the
+statement binds them to its source and parameters. The resolver of the
+expression around is passed on. So a name that only the query around
+knows is a correlated subquery, roadmap step 32, and not an unknown
+column.
+
+A subquery of step 31 reads no column of the query around. Its answer
+is the same for each row, so it runs once, at its first use, and keeps
+the answer for the run. A test counts the scans of each table: one per
+run, for a value, for EXISTS and for IN.
+
+A value subquery reads at most
+two rows, enough to tell one from more. EXISTS reads one. IN reads all
+rows, counts them toward `QueryMemory`, and sorts the values. A lookup
+is then a binary search with the comparison of the engine, so 1.0 is in a
+set that holds 1.
+
+All subqueries of a statement see the state before it. UPDATE and
+DELETE found their rows before the first write already. INSERT now
+computes the values of all rows first, then writes them. Measured in
+SQLite 3.54.0 over an empty t: an INSERT of three rows with
+`(SELECT count(*) FROM t)`, the same, and `(SELECT count(*) + 10 FROM t)`
+gives 0, 0 and 10. Row by row, it would give 0, 1 and 12.
+
+`Compile` takes no subquery; `compileWith` does. A CHECK and the values
+of the planner use `Compile`. A CHECK reads one row and must give the
+same answer each time, so a subquery there is refused by name. The
+planner takes IN as a list of values to scan; IN with a subquery has an
+empty list, so the planner skips it.
+
+### Rejected: run each subquery at the start of its statement
+
+That would give the same answers for less code. But a subquery that no
+row needs would run too, and fail too. In SQLite,
+`CASE WHEN FALSE THEN (SELECT a FROM t) ELSE 5 END` is 5 with two rows
+in t, and a WHERE over an empty table runs no subquery.
+
+### Rejected: a hash set for IN
+
+A hash needs one key for values that compare equal, such as 1 and 1.0.
+The sorted list uses the comparison that `=` uses, so IN and `=` cannot
+disagree.
+
+### Rejected: the first row of a value subquery, as in SQLite
+
+L-16 asks for an error. A query that gives more rows than its author
+expected is a wrong answer that no one sees.
+
 ## Indexes
 
 An index is a tree of its own. The key of an entry is the index columns of

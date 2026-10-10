@@ -158,6 +158,7 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | `INSERT ... DEFAULT VALUES` | the defaults of all columns | not in the SQL |
 | `CHECK (a)` for an INTEGER `a` | the number as true or false | error when the table is made: CHECK needs BOOLEAN |
 | `CHECK (NULL)` | each row passes | error when the table is made: NULL has no type |
+| `(SELECT ...)` as a value with more than one row | the first row | error: a subquery as a value needs at most one row (L-16) |
 | an error inside a CHECK, such as `10 / 0` | NULL, so the row passes | error of the statement |
 | `CONSTRAINT name CHECK (...)` | a named check | not in the SQL |
 | `UNIQUE (a, a)` | taken | error when the table is made |

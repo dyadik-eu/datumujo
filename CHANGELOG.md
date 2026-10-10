@@ -29,7 +29,17 @@ the API and the file format can change in any release.
 - UNIQUE on a column and on a table in SQL. Each is a unique index
   called `<table>_unique_<n>`; an INSERT or UPDATE that breaks it fails
   with `ErrUnique`. See "Unique" in [docs/sql.md](docs/sql.md).
+- Subqueries in SQL that read no column of the query around them:
+  `(SELECT ...)` as a value, `EXISTS (SELECT ...)` and
+  `x IN (SELECT ...)`. A subquery as a value with more than one row is
+  an error. See "Subqueries" in [docs/sql.md](docs/sql.md).
 - `datumujo check` and `Stats.FormatVersion` report the format version.
+
+### Changed
+
+- An SQL INSERT computes the values of all its rows before it writes
+  the first one. A subquery in it sees the table as it was before the
+  statement, as in SQLite.
 
 ### File format
 
