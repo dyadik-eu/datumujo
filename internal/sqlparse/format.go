@@ -117,8 +117,15 @@ func not(n bool) string {
 }
 
 func (e *In) String() string {
+	if e.Select != nil {
+		return "(" + e.X.String() + " " + not(e.Not) + "IN (" + e.Select.String() + "))"
+	}
 	return "(" + e.X.String() + " " + not(e.Not) + "IN (" + exprs(e.List) + "))"
 }
+
+func (e *Subquery) String() string { return "(" + e.Select.String() + ")" }
+
+func (e *Exists) String() string { return "EXISTS (" + e.Select.String() + ")" }
 
 func (e *Between) String() string {
 	return "(" + e.X.String() + " " + not(e.Not) + "BETWEEN " + e.Lo.String() + " AND " + e.Hi.String() + ")"

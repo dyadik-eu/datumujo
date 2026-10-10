@@ -984,7 +984,13 @@ func (p *parser) equality() (Expr, error) {
 				if err := p.expectOp("("); err != nil {
 					return nil, err
 				}
-				list, err := p.exprList()
+				in := &In{At: at, X: l, Not: not}
+				var err error
+				if p.isKw("SELECT") {
+					in.Select, err = p.subSelect()
+				} else {
+					in.List, err = p.exprList()
+				}
 				if err != nil {
 					return nil, err
 				}
@@ -994,7 +1000,7 @@ func (p *parser) equality() (Expr, error) {
 				// The list ends in a parenthesis. So an operator that
 				// binds more tightly takes the whole IN as its left
 				// operand. As in SQLite, a IN (1) + 2 is (a IN (1)) + 2.
-				if l, err = p.climb(&In{At: at, X: l, List: list, Not: not}); err != nil {
+				if l, err = p.climb(in); err != nil {
 					return nil, err
 				}
 			case p.isKw("BETWEEN"):
@@ -1208,6 +1214,13 @@ func (p *parser) primary() (Expr, error) {
 			if err := p.advance(); err != nil {
 				return nil, err
 			}
+			if p.isKw("SELECT") {
+				sel, err := p.subSelect()
+				if err != nil {
+					return nil, err
+				}
+				return &Subquery{At: at, Select: sel}, p.expectOp(")")
+			}
 			e, err := p.expr()
 			if err != nil {
 				return nil, err
@@ -1217,6 +1230,21 @@ func (p *parser) primary() (Expr, error) {
 	case tIdent, tQuoted:
 		if err := p.advance(); err != nil {
 			return nil, err
+		}
+		// EXISTS is a word of its place: before ( it starts a subquery.
+		// No function is called exists.
+		if t.kind == tIdent && t.text == "exists" && p.isOp("(") {
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			if !p.isKw("SELECT") {
+				return nil, p.unexpected("SELECT after EXISTS (")
+			}
+			sel, err := p.subSelect()
+			if err != nil {
+				return nil, err
+			}
+			return &Exists{At: at, Select: sel}, p.expectOp(")")
 		}
 		if t.kind == tIdent && p.isOp("(") {
 			return p.call(t)
@@ -1234,6 +1262,17 @@ func (p *parser) primary() (Expr, error) {
 		return &ColumnRef{At: at, Name: t.text}, nil
 	}
 	return nil, p.unexpected("an expression")
+}
+
+// subSelect reads a SELECT inside an expression. Its items are
+// expressions, and expr counts each level, so MaxDepth bounds subqueries
+// in subqueries too.
+func (p *parser) subSelect() (*Select, error) {
+	st, err := p.selectStmt()
+	if err != nil {
+		return nil, err
+	}
+	return st.(*Select), nil
 }
 
 func (p *parser) call(name token) (Expr, error) {

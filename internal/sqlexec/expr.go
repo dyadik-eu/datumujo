@@ -247,6 +247,10 @@ func (c *compiler) node(e sqlparse.Expr) (node, error) {
 		return c.cast(x)
 	case *sqlparse.Case:
 		return c.caseExpr(x)
+	case *sqlparse.Subquery:
+		return node{}, notYet(x.At, "a subquery", 31)
+	case *sqlparse.Exists:
+		return node{}, notYet(x.At, "EXISTS", 31)
 	}
 	return node{}, errAt(e.Pos(), "expression %s is not supported", e)
 }
@@ -606,6 +610,9 @@ func equal(a, b node, l, r any, what string) (any, error) {
 }
 
 func (c *compiler) in(x *sqlparse.In) (node, error) {
+	if x.Select != nil {
+		return node{}, notYet(x.At, "IN (SELECT ...)", 31)
+	}
 	a, err := c.expr(x.X)
 	if err != nil {
 		return node{}, err

@@ -161,6 +161,10 @@ var statements = []struct{ src, want string }{
 	{"create table u (id integer primary key, a text unique not null, b int, c int, unique (b, c), unique(a), check (b > 0))",
 		"CREATE TABLE u (id INTEGER, a TEXT NOT NULL UNIQUE, b INTEGER, c INTEGER, PRIMARY KEY (id), UNIQUE (b, c), UNIQUE (a), CHECK ((b > 0)))"},
 	{"ALTER TABLE t ADD COLUMN u TEXT UNIQUE", "ALTER TABLE t ADD COLUMN u TEXT UNIQUE"},
+	{"select (select max(b) from u), a from t where a in (select b from u where b > ?) and not exists (select * from u) or exists(select 1)",
+		"SELECT (SELECT max(b) FROM u), a FROM t WHERE (((a IN (SELECT b FROM u WHERE (b > ?1))) AND (NOT EXISTS (SELECT * FROM u))) OR EXISTS (SELECT 1))"},
+	{"SELECT a NOT IN (SELECT b FROM u ORDER BY b LIMIT 2) + 1", "SELECT ((a NOT IN (SELECT b FROM u ORDER BY b LIMIT 2)) + 1)"},
+	{"UPDATE t SET a = (SELECT (SELECT 1)) WHERE b IN (SELECT 2)", "UPDATE t SET a = (SELECT (SELECT 1)) WHERE (b IN (SELECT 2))"},
 	{"CREATE UNIQUE INDEX by_name ON account (name)", "CREATE UNIQUE INDEX by_name ON account (name)"},
 	{"create index if not exists s on issue(repo, state)", "CREATE INDEX IF NOT EXISTS s ON issue (repo, state)"},
 	{"DROP TABLE issue", "DROP TABLE issue"},
@@ -251,6 +255,10 @@ func TestErrors(t *testing.T) {
 		{"CREATE TABLE t (a INTEGER DEFAULT 1 DEFAULT 2)", 1, 37, "column a: DEFAULT twice"},
 		{"CREATE TABLE t (a INTEGER CHECK a > 0)", 1, 33, "a, want ("},
 		{"CREATE TABLE t (a INTEGER UNIQUE UNIQUE)", 1, 34, "column a: UNIQUE twice"},
+		{"SELECT EXISTS (1)", 1, 16, "1, want SELECT after EXISTS ("},
+		{"SELECT (SELECT 1", 1, 17, "want )"},
+		{"SELECT a IN (SELECT 1, 2", 1, 25, "want )"},
+		{"SELECT (SELECT)", 1, 15, "want an expression"},
 		{"CREATE TABLE t (a INTEGER, UNIQUE a)", 1, 35, "a, want ("},
 		{"CREATE TABLE t (a INTEGER, UNIQUE ())", 1, 36, "want a column name"},
 		{"CREATE TABLE t (a INTEGER CHECK (a >))", 1, 37, "want an expression"},
@@ -323,6 +331,18 @@ func TestDepth(t *testing.T) {
 		ok := "SELECT " + strings.Repeat(c.open, MaxDepth/2) + "1" + strings.Repeat(c.close, MaxDepth/2)
 		if _, err := Parse(ok); err != nil {
 			t.Errorf("%s nested %d times: %v", c.open, MaxDepth/2, err)
+		}
+	}
+	// Each subquery reaches its items through expr, which counts the
+	// level. So subqueries in subqueries stop at MaxDepth too.
+	for _, open := range []string{"(SELECT ", "EXISTS (SELECT ", "1 IN (SELECT "} {
+		deep := "SELECT " + strings.Repeat(open, 5000) + "1" + strings.Repeat(")", 5000)
+		if _, err := Parse(deep); err == nil || !strings.Contains(err.Error(), "nested more than") {
+			t.Errorf("%s nested 5000 times: %v", open, err)
+		}
+		ok := "SELECT " + strings.Repeat(open, MaxDepth/4) + "1" + strings.Repeat(")", MaxDepth/4)
+		if _, err := Parse(ok); err != nil {
+			t.Errorf("%s nested %d times: %v", open, MaxDepth/4, err)
 		}
 	}
 }
@@ -399,6 +419,7 @@ func FuzzParse(f *testing.F) {
 		"CREATE TABLE t (a INTEGER DEFAULT -9223372036854775808, b TIMESTAMP DEFAULT current_timestamp, c BLOB DEFAULT X'')",
 		"CREATE TABLE t (check INTEGER CHECK (check > 0), CHECK (check < 9))",
 		"CREATE TABLE t (a INTEGER UNIQUE, b TEXT, UNIQUE (a, b), UNIQUE (b))",
+		"SELECT (SELECT a FROM t WHERE a IN (SELECT ?)), NOT EXISTS (SELECT * FROM u) FROM v",
 	} {
 		f.Add(s)
 	}
