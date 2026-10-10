@@ -49,7 +49,7 @@ func fitDefault(t *table.Table, col table.Column, d *sqlparse.Default, now time.
 	// A table with the column alone, so that newTarget checks the type
 	// and value fits the value, as for an INSERT.
 	one := &table.Table{Name: t.Name, Columns: []table.Column{col}}
-	tg, err := newTarget(one, 0, &sqlparse.Literal{At: d.At, Value: d.Value}, nil)
+	tg, err := newTarget(one, 0, &sqlparse.Literal{At: d.At, Value: d.Value}, nil, nil)
 	if err != nil {
 		return nil, err
 	}

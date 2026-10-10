@@ -41,6 +41,7 @@ type Query struct {
 	lim      Limits
 	group    *groupPlan // set for GROUP BY, HAVING or an aggregate
 	having   *Expr
+	subs     *subqueries // the subqueries of the expressions of the query
 }
 
 // outCol computes one column of the result from a row of the table:
@@ -151,7 +152,13 @@ func notYet(at sqlparse.At, what string, step int) error {
 
 // Prepare compiles a SELECT against a schema and chooses its plan.
 func Prepare(sc *table.Schema, st *sqlparse.Select, lim Limits) (*Query, error) {
-	q := &Query{st: st, distinct: st.Distinct, lim: lim}
+	return prepare(sc, st, lim, nil)
+}
+
+// prepare is Prepare for a query inside the expressions of others, with
+// their resolvers in outers.
+func prepare(sc *table.Schema, st *sqlparse.Select, lim Limits, outers []Resolver) (*Query, error) {
+	q := &Query{st: st, distinct: st.Distinct, lim: lim, subs: newSubqueries(sc, lim, outers)}
 	if st.From != nil {
 		if err := q.addSource(sc, *st.From, false); err != nil {
 			return nil, err
@@ -162,7 +169,7 @@ func Prepare(sc *table.Schema, st *sqlparse.Select, lim Limits) (*Query, error) 
 			}
 			// ON reads the tables up to its own, not those after it.
 			src := q.srcs[len(q.srcs)-1]
-			on, err := Compile(j.On, scope{q.srcs})
+			on, err := compileWith(j.On, scope{q.srcs}, q.subs)
 			if err != nil {
 				return nil, err
 			}
@@ -209,7 +216,7 @@ func Prepare(sc *table.Schema, st *sqlparse.Select, lim Limits) (*Query, error) 
 			}
 			continue
 		}
-		x, err := Compile(it.Expr, s)
+		x, err := compileWith(it.Expr, s, q.subs)
 		if err != nil {
 			return nil, err
 		}
@@ -227,7 +234,7 @@ func Prepare(sc *table.Schema, st *sqlparse.Select, lim Limits) (*Query, error) 
 	}
 	var err error
 	if st.Where != nil {
-		if q.where, err = Compile(st.Where, s); err != nil {
+		if q.where, err = compileWith(st.Where, s, q.subs); err != nil {
 			return nil, err
 		}
 		if typ, ok := q.where.Type(); ok && typ != table.Bool {
@@ -245,12 +252,12 @@ func Prepare(sc *table.Schema, st *sqlparse.Select, lim Limits) (*Query, error) 
 		q.order = append(q.order, k)
 	}
 	if st.Limit != nil {
-		if q.limit, err = bound(st.Limit, "LIMIT"); err != nil {
+		if q.limit, err = bound(st.Limit, "LIMIT", q.subs); err != nil {
 			return nil, err
 		}
 	}
 	if st.Offset != nil {
-		if q.offset, err = bound(st.Offset, "OFFSET"); err != nil {
+		if q.offset, err = bound(st.Offset, "OFFSET", q.subs); err != nil {
 			return nil, err
 		}
 	}
@@ -286,7 +293,7 @@ func (q *Query) orderKey(o sqlparse.Order, s scope) (orderKey, error) {
 			out++
 		}
 	}
-	x, err := Compile(o.Expr, s)
+	x, err := compileWith(o.Expr, s, q.subs)
 	if err != nil {
 		return k, err
 	}
@@ -295,8 +302,8 @@ func (q *Query) orderKey(o sqlparse.Order, s scope) (orderKey, error) {
 }
 
 // bound compiles LIMIT or OFFSET. It reads no column.
-func bound(e sqlparse.Expr, what string) (*Expr, error) {
-	x, err := Compile(e, nil)
+func bound(e sqlparse.Expr, what string, subs *subqueries) (*Expr, error) {
+	x, err := compileWith(e, nil, subs)
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +333,10 @@ func (r *Rows) Scanned() int64 { return *r.scanned }
 // Run runs the query on src. A query without ORDER BY and DISTINCT
 // streams: it reads the next row of the table when Next asks for it. The
 // others read all rows first, then sort them or drop the repeated ones.
+// A Query runs once at a time, since its subqueries keep their answers
+// for the run; each caller of this package prepares its own.
 func (q *Query) Run(src Source, params []any) (*Rows, error) {
+	q.subs.bind(src, params)
 	limit, offset := int64(-1), int64(0)
 	var err error
 	if q.limit != nil {

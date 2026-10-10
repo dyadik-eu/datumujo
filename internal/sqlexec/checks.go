@@ -19,10 +19,20 @@ var ErrCheck = errors.New("sqlexec: a CHECK of the table is false")
 // t. It must be BOOLEAN, and it must give the same answer for the same
 // row each time: no parameter and no aggregate.
 func compileCheck(t *table.Table, e sqlparse.Expr) (*Expr, error) {
-	var param, agg sqlparse.Expr
+	var param, agg, sub sqlparse.Expr
 	rewrite(e, func(x sqlparse.Expr) (sqlparse.Expr, bool) {
 		if _, ok := x.(*sqlparse.Param); ok && param == nil {
 			param = x
+		}
+		switch y := x.(type) {
+		case *sqlparse.Subquery, *sqlparse.Exists:
+			if sub == nil {
+				sub = x
+			}
+		case *sqlparse.In:
+			if y.Select != nil && sub == nil {
+				sub = x
+			}
 		}
 		if c, ok := x.(*sqlparse.Call); ok && isAggregate(c) && agg == nil {
 			agg = x
@@ -34,6 +44,9 @@ func compileCheck(t *table.Table, e sqlparse.Expr) (*Expr, error) {
 	}
 	if agg != nil {
 		return nil, errAt(agg.Pos(), "a CHECK takes no aggregate")
+	}
+	if sub != nil {
+		return nil, errAt(sub.Pos(), "a CHECK takes no subquery")
 	}
 	x, err := Compile(e, tableScope{t})
 	if err != nil {
