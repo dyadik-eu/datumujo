@@ -2,7 +2,7 @@
 
 This is the SQL of stage 2 and of the parts of stage 3 that are done.
 It says what the SQL has, how its values behave, and its limits. The requirements are
-L-1 to L-12, L-13 for DEFAULT, L-14 for CHECK and L-15 for UNIQUE, in [requirements.md](requirements.md). Each difference to SQLite is in the
+L-1 to L-12, L-13 for DEFAULT, L-14 for CHECK, L-15 for UNIQUE and L-16 for subqueries, in [requirements.md](requirements.md). Each difference to SQLite is in the
 oracle table there. How the parts work is in [design.md](design.md).
 
 ## Where SQL runs
@@ -139,6 +139,37 @@ A UNIQUE names columns of the statement, each once. ALTER TABLE ADD
 COLUMN takes no UNIQUE; add the column, then CREATE UNIQUE INDEX on it.
 UNIQUE keeps the file at format version 1, which v0.2.0 reads.
 
+## Subqueries
+
+A SELECT in parentheses can stand in an expression, in three forms:
+
+| Form | Result |
+|---|---|
+| `(SELECT ...)` | the one column of its row; NULL without a row |
+| `EXISTS (SELECT ...)` | TRUE when the query has a row |
+| `x [NOT] IN (SELECT ...)` | as IN with a list of the values of its one column |
+
+```sql
+SELECT name FROM member
+WHERE team IN (SELECT id FROM team WHERE active)
+  AND seat > (SELECT min(seat) FROM member)
+```
+
+They work in SELECT, INSERT, UPDATE and DELETE. In a query, they work
+in WHERE, in its columns, in ORDER BY, LIMIT and HAVING, and in another
+subquery. A subquery as a value with more than one row is an error;
+SQLite takes the first row. IN with an empty subquery is FALSE, even for
+NULL. Otherwise NULL in the subquery or as x gives NULL, unless a value
+equals x.
+
+A subquery runs once for each run of its statement, at its first use,
+and keeps its answer. One that no row needs does not run. It sees the
+tables as they were before the statement: an INSERT of three rows with
+`(SELECT count(*) FROM t)` gives each row the same count.
+
+A subquery reads no column of the query around it yet; that fails as
+not supported. A CHECK takes no subquery.
+
 ## Types
 
 | Type | Names | Go value |
@@ -237,7 +268,7 @@ first that does not fails. The tests are `TestLimits` in
 | an index entry | 1000 bytes: the index columns, then the key |
 | the name of the index of a UNIQUE | 255 bytes, so a table name of at most 245 bytes for `_unique_1` |
 | a value outside a key | no limit of its own; the changes of a transaction are at most `Options.MaxTxBytes`, 16 MiB by default |
-| the rows a statement holds to sort, group or change | `Options.QueryMemory`, 64 MiB by default |
+| the rows a statement holds to sort, group or change, and the values of IN (SELECT ...) | `Options.QueryMemory`, 64 MiB by default |
 | nesting of expressions | 200 levels |
 | parameters | 32766 |
 
@@ -248,8 +279,11 @@ byte more in an index.
 
 ## Not in stage 2
 
-Subqueries, common table expressions, views, triggers, foreign keys,
-window functions, UNION, NATURAL and USING joins, upsert, a DEFAULT
-that is an expression, `INSERT ... DEFAULT VALUES`, and `CONSTRAINT`
-with a name. The roadmap to v1.0 in [roadmap.md](roadmap.md) says which of
+- subqueries that read a column of the query around them
+- common table expressions, views, triggers, foreign keys
+- window functions, UNION, NATURAL and USING joins, upsert
+- a DEFAULT that is an expression, `INSERT ... DEFAULT VALUES`
+- `CONSTRAINT` with a name
+
+The roadmap to v1.0 in [roadmap.md](roadmap.md) says which of
 them come when.

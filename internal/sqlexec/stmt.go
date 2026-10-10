@@ -84,7 +84,7 @@ func run(tx *table.Tx, st sqlparse.Statement, params []any, lim Limits) (Result,
 	case *sqlparse.AddColumn:
 		return Result{}, addColumn(tx, s)
 	case *sqlparse.Insert:
-		return insert(tx, s, params)
+		return insert(tx, s, params, lim)
 	case *sqlparse.Update:
 		return update(tx, s, params, lim)
 	case *sqlparse.Delete:
@@ -339,8 +339,8 @@ type target struct {
 	desc string
 }
 
-func newTarget(t *table.Table, col int, e sqlparse.Expr, r Resolver) (target, error) {
-	x, err := Compile(e, r)
+func newTarget(t *table.Table, col int, e sqlparse.Expr, r Resolver, subs *subqueries) (target, error) {
+	x, err := compileWith(e, r, subs)
 	if err != nil {
 		return target{}, err
 	}
@@ -401,7 +401,7 @@ func nextKey(tx *table.Tx, t *table.Table, col int, at sqlparse.At) (int64, erro
 	return last + 1, nil
 }
 
-func insert(tx *table.Tx, s *sqlparse.Insert, params []any) (Result, error) {
+func insert(tx *table.Tx, s *sqlparse.Insert, params []any, lim Limits) (Result, error) {
 	t, err := findTable(tx, s.At, s.Table)
 	if err != nil {
 		return Result{}, err
@@ -423,13 +423,14 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any) (Result, error) {
 			cols = append(cols, i)
 		}
 	}
+	subs := newSubqueries(tx.Schema(), lim, nil)
 	rows := make([][]target, len(s.Rows))
 	for i, r := range s.Rows {
 		if len(r) != len(cols) {
 			return Result{}, errAt(r[0].Pos(), "%d values for %d columns", len(r), len(cols))
 		}
 		for j, e := range r {
-			tg, err := newTarget(t, cols[j], e, nil)
+			tg, err := newTarget(t, cols[j], e, nil, subs)
 			if err != nil {
 				return Result{}, err
 			}
@@ -452,8 +453,10 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	var res Result
-	auto, hasAuto := autoKey(t)
+	// Every value comes first, then every write: a subquery reads the
+	// table as it was before the statement, as in SQLite.
+	subs.bind(tx, params)
+	values := make([][]any, len(rows))
 	for i, targets := range rows {
 		row := make([]any, len(t.Columns))
 		copy(row, defs)
@@ -462,6 +465,11 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any) (Result, error) {
 				return Result{}, err
 			}
 		}
+		values[i] = row
+	}
+	var res Result
+	auto, hasAuto := autoKey(t)
+	for i, row := range values {
 		at := s.Rows[i][0].Pos()
 		if hasAuto && row[auto] == nil {
 			if row[auto], err = nextKey(tx, t, auto, at); err != nil {
@@ -486,11 +494,11 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any) (Result, error) {
 }
 
 // where compiles a WHERE clause over a table. nil keeps every row.
-func where(e sqlparse.Expr, t *table.Table) (*Expr, error) {
+func where(e sqlparse.Expr, t *table.Table, subs *subqueries) (*Expr, error) {
 	if e == nil {
 		return nil, nil
 	}
-	x, err := Compile(e, tableScope{t})
+	x, err := compileWith(e, tableScope{t}, subs)
 	if err != nil {
 		return nil, err
 	}
@@ -577,6 +585,7 @@ func update(tx *table.Tx, s *sqlparse.Update, params []any, lim Limits) (Result,
 		return Result{}, err
 	}
 	scope := tableScope{t}
+	subs := newSubqueries(tx.Schema(), lim, nil)
 	var sets []target
 	seen := map[int]bool{}
 	for _, a := range s.Set {
@@ -588,13 +597,13 @@ func update(tx *table.Tx, s *sqlparse.Update, params []any, lim Limits) (Result,
 			return Result{}, errAt(a.At, "column %s set twice", a.Column)
 		}
 		seen[col] = true
-		tg, err := newTarget(t, col, a.Value, scope)
+		tg, err := newTarget(t, col, a.Value, scope, subs)
 		if err != nil {
 			return Result{}, err
 		}
 		sets = append(sets, tg)
 	}
-	w, err := where(s.Where, t)
+	w, err := where(s.Where, t, subs)
 	if err != nil {
 		return Result{}, err
 	}
@@ -603,6 +612,7 @@ func update(tx *table.Tx, s *sqlparse.Update, params []any, lim Limits) (Result,
 		return Result{}, err
 	}
 	var scanned int64
+	subs.bind(tx, params)
 	old, err := matching(tx, t, w, s.Where, s.At, params, lim, &scanned)
 	if err != nil {
 		return Result{}, err
@@ -642,10 +652,12 @@ func deleteRows(tx *table.Tx, s *sqlparse.Delete, params []any, lim Limits) (Res
 	if err != nil {
 		return Result{}, err
 	}
-	w, err := where(s.Where, t)
+	subs := newSubqueries(tx.Schema(), lim, nil)
+	w, err := where(s.Where, t, subs)
 	if err != nil {
 		return Result{}, err
 	}
+	subs.bind(tx, params)
 	var scanned int64
 	rows, err := matching(tx, t, w, s.Where, s.At, params, lim, &scanned)
 	if err != nil {

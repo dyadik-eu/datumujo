@@ -87,6 +87,21 @@ type In struct {
 	X    Expr
 	List []Expr
 	Not  bool
+	// Select is set for X IN (SELECT ...); List is then empty.
+	Select *Select
+}
+
+// Subquery is (SELECT ...) as a value: the first column of its row, NULL
+// without a row.
+type Subquery struct {
+	At
+	Select *Select
+}
+
+// Exists is EXISTS (SELECT ...): whether the query has a row.
+type Exists struct {
+	At
+	Select *Select
 }
 
 // Between is X [NOT] BETWEEN Lo AND Hi.
@@ -136,6 +151,8 @@ func (*Between) expr()   {}
 func (*Call) expr()      {}
 func (*Cast) expr()      {}
 func (*Case) expr()      {}
+func (*Subquery) expr()  {}
+func (*Exists) expr()    {}
 
 // ColumnDef is a column of CREATE TABLE or ALTER TABLE ADD COLUMN.
 // Default is nil without DEFAULT. Checks are the CHECK conditions of the

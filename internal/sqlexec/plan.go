@@ -138,7 +138,9 @@ func constraintsFor(exprs []sqlparse.Expr, full, prefix Resolver, lo, hi int) []
 			}
 		case *sqlparse.In:
 			c, ok := col(x.X)
-			if x.Not || !ok {
+			// A subquery is no list of values: its List is empty, and an
+			// empty IN would read no row.
+			if x.Not || !ok || x.Select != nil {
 				return
 			}
 			var vs []*Expr

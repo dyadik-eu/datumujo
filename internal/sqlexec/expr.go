@@ -56,11 +56,21 @@ type Expr struct{ n node }
 // that does not fit is an error here, before any row is read. Where a
 // type is known only when the expression runs, as for a parameter, the
 // check runs then.
+//
+// Compile takes no subquery: a CHECK and a value of the planner have
+// none. The parts of a statement that may hold one compile with
+// compileWith.
 func Compile(e sqlparse.Expr, r Resolver) (*Expr, error) {
+	return compileWith(e, r, nil)
+}
+
+// compileWith is Compile for an expression that may hold subqueries. Each
+// one it finds joins subs, which runs them.
+func compileWith(e sqlparse.Expr, r Resolver, subs *subqueries) (*Expr, error) {
 	if r == nil {
 		r = noColumns{}
 	}
-	c := &compiler{r: r}
+	c := &compiler{r: r, subs: subs}
 	n, err := c.expr(e)
 	if err != nil {
 		return nil, err
@@ -78,7 +88,8 @@ func (x *Expr) Eval(row, params []any) (any, error) {
 }
 
 type compiler struct {
-	r Resolver
+	r    Resolver
+	subs *subqueries // nil where no subquery can run
 }
 
 func known(t table.Type) node { return node{typ: t, known: true} }
@@ -228,6 +239,9 @@ func (c *compiler) node(e sqlparse.Expr) (node, error) {
 	case *sqlparse.ColumnRef:
 		i, t, err := c.r.Column(x.Table, x.Name)
 		if err != nil {
+			if c.outerColumn(x.Table, x.Name) {
+				return node{}, notYet(x.At, "a subquery that reads a column of the query around it", 32)
+			}
 			return node{}, errAt(x.At, "%v", err)
 		}
 		n := known(t)
@@ -247,6 +261,10 @@ func (c *compiler) node(e sqlparse.Expr) (node, error) {
 		return c.cast(x)
 	case *sqlparse.Case:
 		return c.caseExpr(x)
+	case *sqlparse.Subquery:
+		return c.scalar(x)
+	case *sqlparse.Exists:
+		return c.exists(x)
 	}
 	return node{}, errAt(e.Pos(), "expression %s is not supported", e)
 }
@@ -609,6 +627,9 @@ func (c *compiler) in(x *sqlparse.In) (node, error) {
 	a, err := c.expr(x.X)
 	if err != nil {
 		return node{}, err
+	}
+	if x.Select != nil {
+		return c.inSelect(x, a)
 	}
 	list, err := c.exprs(x.List)
 	if err != nil {

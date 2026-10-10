@@ -113,6 +113,7 @@ type groupPlan struct {
 	aggs  []aggFunc
 	slots map[string]int
 	types []Column
+	subs  *subqueries // of the query
 }
 
 // groupScope resolves the columns of the group row. Any other column is
@@ -184,7 +185,7 @@ func (g *groupPlan) addAggregate(c *sqlparse.Call, rows Resolver) (Column, error
 				return col, errAt(arg.Pos(), "an aggregate inside the aggregate %s", c.Name)
 			}
 		}
-		x, err := Compile(c.Args[0], rows)
+		x, err := compileWith(c.Args[0], rows, g.subs)
 		if err != nil {
 			return col, err
 		}
@@ -455,7 +456,7 @@ func (q *Query) groups(read func() ([]any, bool, error), params []any) ([][]any,
 // prepareGroups compiles a query with GROUP BY, HAVING or an aggregate.
 // It sets the columns of the result, HAVING and ORDER BY of q.
 func (q *Query) prepareGroups(st *sqlparse.Select, rows Resolver) error {
-	g := &groupPlan{slots: map[string]int{}}
+	g := &groupPlan{slots: map[string]int{}, subs: q.subs}
 	q.group = g
 	for _, e := range st.GroupBy {
 		if hasAggregate(e) {
@@ -467,7 +468,7 @@ func (q *Query) prepareGroups(st *sqlparse.Select, rows Resolver) error {
 			// row off its slot.
 			continue
 		}
-		x, err := Compile(e, rows)
+		x, err := compileWith(e, rows, q.subs)
 		if err != nil {
 			return err
 		}
@@ -508,7 +509,7 @@ func (q *Query) prepareGroups(st *sqlparse.Select, rows Resolver) error {
 	}
 	scope := groupScope{g}
 	for i, e := range items {
-		x, err := Compile(e, scope)
+		x, err := compileWith(e, scope, q.subs)
 		if err != nil {
 			return err
 		}
@@ -526,7 +527,7 @@ func (q *Query) prepareGroups(st *sqlparse.Select, rows Resolver) error {
 		q.names = append(q.names, Column{Name: name, Type: typ, Known: known})
 	}
 	if having != nil {
-		x, err := Compile(having, scope)
+		x, err := compileWith(having, scope, q.subs)
 		if err != nil {
 			return err
 		}
@@ -543,7 +544,7 @@ func (q *Query) prepareGroups(st *sqlparse.Select, rows Resolver) error {
 			}
 		}
 		if k.out == -1 {
-			x, err := Compile(orders[i], scope)
+			x, err := compileWith(orders[i], scope, q.subs)
 			if err != nil {
 				return err
 			}
