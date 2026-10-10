@@ -2,7 +2,9 @@ package sqlexec
 
 import (
 	"fmt"
+	"math"
 	"slices"
+	"sort"
 
 	"github.com/dyadik-eu/datumujo/internal/sqlparse"
 	"github.com/dyadik-eu/datumujo/internal/table"
@@ -53,6 +55,7 @@ type subquery struct {
 	done   bool
 	rows   [][]any // at most two: enough to tell one row from more
 	err    error
+	set    *inSet // the answer after IN, once read
 }
 
 // run runs the subquery once per run and reads at most max rows of it.
@@ -149,6 +152,131 @@ func (c *compiler) exists(x *sqlparse.Exists) (node, error) {
 			return nil, err
 		}
 		return len(sub.rows) > 0, nil
+	}
+	return n, nil
+}
+
+// inSet is the answer of a subquery after IN: its values, sorted, and
+// whether one of them is NULL or NaN, which equals nothing.
+type inSet struct {
+	vals    []any
+	unknown bool
+}
+
+// readSet reads all rows of the subquery once per run. The values count
+// toward the memory of the statement. They must compare with one
+// another: a column whose type is only known at run time may mix them.
+func (s *subquery) readSet(at sqlparse.At, lim Limits) (*inSet, error) {
+	if !s.bound {
+		return nil, fmt.Errorf("sqlexec: the subquery %s ran before its statement started", s.text)
+	}
+	if s.done {
+		return s.set, s.err
+	}
+	s.done = true
+	s.set, s.err = s.collect(at, lim)
+	return s.set, s.err
+}
+
+func (s *subquery) collect(at sqlparse.At, lim Limits) (*inSet, error) {
+	rows, err := s.q.Run(s.src, s.params)
+	if err != nil {
+		return nil, err
+	}
+	mem := &memory{max: lim.maxMemory(), at: at}
+	set := &inSet{}
+	var first table.Type
+	for rows.Next() {
+		v := rows.Row()[0]
+		if err := mem.add([]any{v}); err != nil {
+			return nil, err
+		}
+		if f, ok := v.(float64); v == nil || ok && math.IsNaN(f) {
+			set.unknown = true
+			continue
+		}
+		typ, _ := typeOf(v)
+		if len(set.vals) == 0 {
+			first = typ
+		} else if !comparable(first, typ) {
+			return nil, errAt(at, "IN: the subquery %s gives %s and %s; they do not compare", s.text, TypeName(first), TypeName(typ))
+		}
+		set.vals = append(set.vals, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(set.vals, func(i, j int) bool {
+		d, _ := compare(set.vals[i], set.vals[j])
+		return d < 0
+	})
+	return set, nil
+}
+
+// has reports whether v is in the set: true or false. It gives nil when
+// v or a value of the set is NULL and nothing equals v. An empty set
+// holds nothing, so even NULL is not in it.
+func (set *inSet) has(v any) any {
+	if len(set.vals) == 0 && !set.unknown {
+		return false
+	}
+	if v == nil {
+		return nil
+	}
+	if f, ok := v.(float64); ok && math.IsNaN(f) {
+		return nil
+	}
+	i := sort.Search(len(set.vals), func(i int) bool {
+		d, _ := compare(set.vals[i], v)
+		return d >= 0
+	})
+	if i < len(set.vals) {
+		if d, _ := compare(set.vals[i], v); d == 0 {
+			return true
+		}
+	}
+	if set.unknown {
+		return nil
+	}
+	return false
+}
+
+// inSelect compiles x IN (SELECT ...) with x compiled as a. The query
+// gives one column, which must compare with a.
+func (c *compiler) inSelect(x *sqlparse.In, a node) (node, error) {
+	sub, err := c.prepare(x.Select.At, x.Select)
+	if err != nil {
+		return node{}, err
+	}
+	cols := sub.q.names
+	if len(cols) != 1 {
+		return node{}, errAt(x.Select.At, "IN takes a subquery of one column, and %s gives %d", sub.text, len(cols))
+	}
+	b := node{typ: cols[0].Type, known: cols[0].Known, at: x.Select.At, desc: sub.text}
+	if err := comparableNodes(a, b, "IN"); err != nil {
+		return node{}, err
+	}
+	lim := c.subs.lim
+	n := known(table.Bool)
+	n.eval = func(e *env) (any, error) {
+		v, err := a.eval(e)
+		if err != nil {
+			return nil, err
+		}
+		set, err := sub.readSet(x.Select.At, lim)
+		if err != nil {
+			return nil, err
+		}
+		if len(set.vals) > 0 {
+			if err := comparableValues(a, b, v, set.vals[0], "IN"); err != nil {
+				return nil, err
+			}
+		}
+		r := set.has(v)
+		if r == nil || !x.Not {
+			return r, nil
+		}
+		return !r.(bool), nil
 	}
 	return n, nil
 }

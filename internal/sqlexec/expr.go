@@ -624,12 +624,12 @@ func equal(a, b node, l, r any, what string) (any, error) {
 }
 
 func (c *compiler) in(x *sqlparse.In) (node, error) {
-	if x.Select != nil {
-		return node{}, notYet(x.At, "IN (SELECT ...)", 31)
-	}
 	a, err := c.expr(x.X)
 	if err != nil {
 		return node{}, err
+	}
+	if x.Select != nil {
+		return c.inSelect(x, a)
 	}
 	list, err := c.exprs(x.List)
 	if err != nil {
