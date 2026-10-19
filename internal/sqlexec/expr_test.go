@@ -254,6 +254,10 @@ func TestErrors(t *testing.T) {
 		{"substr('a')", nil, 1, 8, "takes 2 or 3 arguments"},
 		{"count(*)", nil, 1, 8, "aggregate function count is not allowed here"},
 		{"max(1)", nil, 1, 8, "aggregate function max"},
+		// Each argument of min and max against each other one, not only
+		// against the first: here its type is not known before the run.
+		{"min(?1, FALSE, 0)", []any{false}, 1, 23, "min: FALSE is BOOLEAN and 0 is INTEGER; they do not compare"},
+		{"max(?1, 'a', 1, 2)", nil, 1, 21, "max: 'a' is TEXT and 1 is INTEGER; they do not compare"},
 		{"a + 1", nil, 1, 8, "no such column: a"},
 		// At the run.
 		{"1 / 0", nil, 1, 10, "division by zero"},
@@ -347,6 +351,12 @@ func FuzzEval(f *testing.F) {
 		"?1 LIKE ?2", "instr(?1, ?2)", "-?1 / ?2",
 		// A parameter of the wrong type in a branch whose type is known.
 		"CASE WHEN ?4 THEN ?3 ELSE 1 END", "coalesce(?3, 1)",
+		// A parameter ahead of known arguments of another type. The type
+		// of the parameter is not known before the run, so each pair
+		// after it must still be checked. min(?1, FALSE, 0) panicked.
+		"min(?1, FALSE, 0)", "max(?1, 'a', 2.5)", "coalesce(?1, FALSE, ?2)",
+		"nullif(?1, FALSE)", "?1 IN (FALSE, ?2, 0)", "?1 BETWEEN FALSE AND ?2",
+		"CASE ?1 WHEN FALSE THEN 1 WHEN ?2 THEN 2 END", "instr(?1, 'a')",
 	} {
 		f.Add(s, int64(3), 2.5, "a%", true)
 	}

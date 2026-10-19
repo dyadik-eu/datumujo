@@ -267,13 +267,17 @@ func sameTypes(name string) func(sqlparse.At, []node) (node, error) {
 	}
 }
 
-// extremePrepare checks the arguments of the scalar min and max. They
-// must compare. The result has a known type only if all have one type.
+// extremePrepare checks the arguments of the scalar min and max. Each
+// must compare with each other one, since the run compares an argument
+// with the best one so far, not with the first. The result has a known
+// type only if all have one type.
 func extremePrepare(name string) func(sqlparse.At, []node) (node, error) {
 	return func(at sqlparse.At, args []node) (node, error) {
-		for _, b := range args[1:] {
-			if err := comparableNodes(args[0], b, name); err != nil {
-				return node{}, err
+		for j, b := range args {
+			for _, a := range args[:j] {
+				if err := comparableNodes(a, b, name); err != nil {
+					return node{}, err
+				}
 			}
 		}
 		n := node{typ: args[0].typ, known: true}

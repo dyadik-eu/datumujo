@@ -41,6 +41,13 @@ the API and the file format can change in any release.
   the first one. A subquery in it sees the table as it was before the
   statement, as in SQLite.
 
+### Fixed
+
+- The scalar `min` and `max` could panic, as `min(?1, FALSE, 0)` did
+  with `?1` = FALSE. A parameter came first, and two later arguments
+  had known types that do not compare. Such a call is now an error
+  before the run, also when `?1` is NULL, where it gave NULL before.
+
 ### File format
 
 Format version 2. The file becomes version 2 with the commit of its
