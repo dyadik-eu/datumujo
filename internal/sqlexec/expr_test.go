@@ -351,6 +351,12 @@ func FuzzEval(f *testing.F) {
 		"?1 LIKE ?2", "instr(?1, ?2)", "-?1 / ?2",
 		// A parameter of the wrong type in a branch whose type is known.
 		"CASE WHEN ?4 THEN ?3 ELSE 1 END", "coalesce(?3, 1)",
+		// A parameter ahead of known arguments of another type. The type
+		// of the parameter is not known before the run, so each pair
+		// after it must still be checked. min(?1, FALSE, 0) panicked.
+		"min(?1, FALSE, 0)", "max(?1, 'a', 2.5)", "coalesce(?1, FALSE, ?2)",
+		"nullif(?1, FALSE)", "?1 IN (FALSE, ?2, 0)", "?1 BETWEEN FALSE AND ?2",
+		"CASE ?1 WHEN FALSE THEN 1 WHEN ?2 THEN 2 END", "instr(?1, 'a')",
 	} {
 		f.Add(s, int64(3), 2.5, "a%", true)
 	}
