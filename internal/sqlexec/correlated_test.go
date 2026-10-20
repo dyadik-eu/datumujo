@@ -211,3 +211,50 @@ func TestCorrelatedWrites(t *testing.T) {
 	failsAt(t, ss, "INSERT INTO t VALUES (5, (SELECT t.id))", 1, 34, "no such column: t.id", nil)
 	failsAt(t, ss, "INSERT INTO t VALUES (5, (SELECT a))", 1, 34, "no such column: a", nil)
 }
+
+// TestCorrelatedGroups: a subquery in a query with GROUP BY reads a key
+// of GROUP BY, also as t.a for GROUP BY a. Any other column of the table
+// is an error, as it is outside a subquery. The expected results are
+// those of SQLite 3.54.0.
+func TestCorrelatedGroups(t *testing.T) {
+	ss := newSession(t, store.Options{})
+	ss.must("CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER, s TEXT)")
+	ss.must("INSERT INTO t VALUES (1, 1, 'x'), (2, 1, 'y'), (3, 2, 'z'), (4, NULL, 'w')")
+	ss.must("CREATE TABLE u (k INTEGER, v INTEGER)")
+	ss.must("INSERT INTO u VALUES (1, 5), (1, 6), (2, 7)")
+	for _, c := range []struct{ src, want string }{
+		{"SELECT a, (SELECT count(*) FROM u WHERE u.k = t.a) FROM t GROUP BY a ORDER BY a", "NULL 0\n1 2\n2 1\n"},
+		{"SELECT a, (SELECT count(*) FROM u WHERE u.k = a) FROM t GROUP BY t.a ORDER BY a", "NULL 0\n1 2\n2 1\n"},
+		// The key a is the second slot of the group row.
+		{"SELECT s, (SELECT count(*) FROM u WHERE u.k = t.a) FROM t GROUP BY s, a ORDER BY s", "'w' 0\n'x' 2\n'y' 2\n'z' 1\n"},
+		{"SELECT a, count(*) FROM t GROUP BY a HAVING EXISTS (SELECT 1 FROM u WHERE u.k = a) ORDER BY a", "1 2\n2 1\n"},
+		{"SELECT a FROM t GROUP BY a ORDER BY (SELECT max(v) FROM u WHERE u.k = t.a) DESC", "2\n1\nNULL\n"},
+		// Outside a subquery too: t.a is the key a.
+		{"SELECT t.a FROM t GROUP BY a ORDER BY 1", "NULL\n1\n2\n"},
+		{"SELECT a, t.a FROM t GROUP BY a, t.a ORDER BY 1", "NULL NULL\n1 1\n2 2\n"},
+	} {
+		got, err := ss.query(c.src)
+		if err != nil || got != c.want {
+			t.Errorf("%s: %q %v, want %q", c.src, got, err, c.want)
+		}
+	}
+	for _, c := range []struct {
+		src       string
+		line, col int
+		msg       string
+	}{
+		// SQLite takes id from some row of the group, a value no rule
+		// picks.
+		{"SELECT a, (SELECT count(*) FROM u WHERE u.k = t.id) FROM t GROUP BY a", 1, 47, "column t.id must be in GROUP BY or in an aggregate function"},
+		// A key that is an expression matches by its text only. SQLite
+		// matches t.a + 1 in the subquery with GROUP BY a + 1.
+		{"SELECT a + 1, (SELECT max(v) FROM u WHERE u.k + 1 = t.a + 1) FROM t GROUP BY a + 1", 1, 53, "column t.a must be in GROUP BY"},
+		{"SELECT a, (SELECT sum(t.id) FROM u) FROM t GROUP BY a", 1, 19, "reads only columns of the query around it"},
+	} {
+		_, err := ss.query(c.src)
+		var e *sqlparse.Error
+		if !errors.As(err, &e) || e.At.Line != c.line || e.At.Col != c.col || !strings.Contains(e.Error(), c.msg) {
+			t.Errorf("%s: %v\n want line %d, column %d: ...%s...", c.src, err, c.line, c.col, c.msg)
+		}
+	}
+}

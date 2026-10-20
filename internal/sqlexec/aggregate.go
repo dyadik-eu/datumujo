@@ -115,15 +115,22 @@ type groupPlan struct {
 	slots map[string]int
 	types []Column
 	subs  *subqueries // of the query
+	rows  Resolver    // the columns of the table
+	cols  map[int]int // the slot of each column of the table that is a key
 }
 
-// groupScope resolves the columns of the group row. Any other column is
-// an error.
+// groupScope resolves the columns of the group row. A column of the
+// table that is a key of GROUP BY is its slot, however it is written: t.a
+// for GROUP BY a too, also in a subquery. Any other column is an error.
 type groupScope struct{ g *groupPlan }
 
 func (s groupScope) Column(tbl, name string) (int, table.Type, error) {
 	if tbl == sqlparse.Derived {
 		if i, ok := s.g.slots[name]; ok {
+			return i, s.g.types[i].Type, nil
+		}
+	} else if col, _, err := s.g.rows.Column(tbl, name); err == nil {
+		if i, ok := s.g.cols[col]; ok {
 			return i, s.g.types[i].Type, nil
 		}
 	}
@@ -460,7 +467,7 @@ func (q *Query) groups(read func() ([]any, bool, error), params []any) ([][]any,
 // prepareGroups compiles a query with GROUP BY, HAVING or an aggregate.
 // It sets the columns of the result, HAVING and ORDER BY of q.
 func (q *Query) prepareGroups(st *sqlparse.Select, rows Resolver) error {
-	g := &groupPlan{slots: map[string]int{}, subs: q.subs}
+	g := &groupPlan{slots: map[string]int{}, subs: q.subs, rows: rows, cols: map[int]int{}}
 	q.group = g
 	for _, e := range st.GroupBy {
 		if hasAggregate(e) {
@@ -477,6 +484,10 @@ func (q *Query) prepareGroups(st *sqlparse.Select, rows Resolver) error {
 			return err
 		}
 		typ, known := x.Type()
+		if ref, ok := e.(*sqlparse.ColumnRef); ok {
+			col, _, _ := rows.Column(ref.Table, ref.Name)
+			g.cols[col] = len(g.texts)
+		}
 		g.keys = append(g.keys, x)
 		g.slot(e.String(), Column{Name: e.String(), Type: typ, Known: known})
 	}
