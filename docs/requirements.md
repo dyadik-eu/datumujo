@@ -159,6 +159,10 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | `CHECK (a)` for an INTEGER `a` | the number as true or false | error when the table is made: CHECK needs BOOLEAN |
 | `CHECK (NULL)` | each row passes | error when the table is made: NULL has no type |
 | `(SELECT ...)` as a value with more than one row | the first row | error: a subquery as a value needs at most one row (L-16) |
+| `UPDATE s SET a = (SELECT sum(w.a) FROM s AS w WHERE w.id <= s.id)` over 1, 2, 3 | 1, 3, 7: each row sees the rows written before it | 1, 3, 6: each new row comes from the old rows |
+| `SELECT (SELECT sum(t.a)) FROM t`, an aggregate over columns of the query around only | an aggregate of the query around | error: such an aggregate is not supported |
+| `t.a + 1` in a subquery with `GROUP BY a + 1` | the key `a + 1` | error: t.a must be in GROUP BY; a key that is an expression matches by its text |
+| ON that reads a table joined after it | taken | error: no such column; ON reads the tables up to its own |
 | an error inside a CHECK, such as `10 / 0` | NULL, so the row passes | error of the statement |
 | `CONSTRAINT name CHECK (...)` | a named check | not in the SQL |
 | `UNIQUE (a, a)` | taken | error when the table is made |

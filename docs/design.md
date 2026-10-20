@@ -417,34 +417,64 @@ The parser reads `(SELECT ...)`, `EXISTS (SELECT ...)` and
 `x IN (SELECT ...)` as nodes that hold a Select. The engine prepares
 each as a Query of its own when it compiles the expression around it.
 The statement keeps a list of its subqueries, and each run of the
-statement binds them to its source and parameters. The resolver of the
-expression around is passed on. So a name that only the query around
-knows is a correlated subquery, roadmap step 32, and not an unknown
-column.
+statement binds them to its source and parameters.
 
-A subquery of step 31 reads no column of the query around. Its answer
-is the same for each row, so it runs once, at its first use, and keeps
-the answer for the run. A test counts the scans of each table: one per
-run, for a value, for EXISTS and for IN.
+A subquery reads the columns of the queries around it through a frame.
+When it compiles a name that none of its tables knows, and a query
+around knows, the name becomes a slot of its frame. The query around
+then compiles the same name in its own scope, as a key of the
+subquery. If that query does not know the name either, the name becomes
+a slot of its own frame. So a subquery reads any level out with no extra
+code, and the nearest query that knows a name has it.
 
-A value subquery reads at most
-two rows, enough to tell one from more. EXISTS reads one. IN reads all
-rows, counts them toward `QueryMemory`, and sorts the values. A lookup
-is then a binary search with the comparison of the engine, so 1.0 is in a
-set that holds 1.
+Only a name that a resolver does not know at all goes out, marked by
+`errNoColumn`. A name that is ambiguous, or must be in GROUP BY, is an
+error where it stands. ON compiles after all tables of the query are
+known, so a name of a later table in ON stays an error.
+
+Before each use, a subquery computes its keys from the row of the query
+around. It runs again when one changes, and keeps its answer while all
+stay the same, bit for bit. So -0.0 and 0.0 are different, and NaN is
+never the same. A subquery without keys runs once per run of its
+statement. A test counts the scans: over rows with keys 1, 1, 2, 2, 1,
+a correlated subquery reads its table 3 times.
+
+A value subquery reads at most two rows, enough to tell one from more.
+EXISTS reads one. IN reads all rows, counts them toward `QueryMemory`,
+and sorts the values. A lookup is then a binary search with the
+comparison of the engine, so 1.0 is in a set that holds 1.
 
 All subqueries of a statement see the state before it. UPDATE and
-DELETE found their rows before the first write already. INSERT now
-computes the values of all rows first, then writes them. Measured in
-SQLite 3.54.0 over an empty t: an INSERT of three rows with
-`(SELECT count(*) FROM t)`, the same, and `(SELECT count(*) + 10 FROM t)`
-gives 0, 0 and 10. Row by row, it would give 0, 1 and 12.
+DELETE find their rows, and UPDATE computes their new values, before
+the first write. INSERT computes the values of all rows first, then
+writes them. Measured in SQLite 3.54.0 over an empty t: an INSERT of
+three rows with `(SELECT count(*) FROM t)`, the same, and
+`(SELECT count(*) + 10 FROM t)` gives 0, 0 and 10. Row by row, it would
+give 0, 1 and 12. For UPDATE, SQLite lets each row see the rows written
+before it; the oracle table has the case.
 
-`Compile` takes no subquery; `compileWith` does. A CHECK and the values
-of the planner use `Compile`. A CHECK reads one row and must give the
-same answer each time, so a subquery there is refused by name. The
-planner takes IN as a list of values to scan; IN with a subquery has an
-empty list, so the planner skips it.
+`Compile` takes no subquery; `compileWith` does. A CHECK reads one row
+and must give the same answer each time, so a subquery there is refused
+by name.
+
+The planner compiles its values with the frame of the query,
+and with no subquery. So in a subquery, `u.k = t.id` bounds a scan of an
+index on `u.k`. The scan reads the frame when it starts, after the
+subquery filled it. A value with a subquery would run it at the start of
+the scan, also when no row needs it. The planner takes IN as a list of
+values to scan; IN with a subquery has an empty list, so the planner
+skips it.
+
+In a query with GROUP BY, a key that is one column has its slot under
+that column too. So `t.a` finds the slot of `GROUP BY a`, in a
+subquery and outside one. A key that is an expression matches by its
+text only.
+
+An aggregate whose argument reads columns of a query around only is
+refused. SQLite makes it an aggregate of the query around, so
+`SELECT (SELECT sum(t.a)) FROM t` sums t.a over all rows. Run as an
+aggregate of the subquery, it would sum one value per row, a different
+number with no error.
 
 ### Rejected: run each subquery at the start of its statement
 
@@ -463,6 +493,21 @@ disagree.
 
 L-16 asks for an error. A query that gives more rows than its author
 expected is a wrong answer that no one sees.
+
+### Rejected: the values of the query around as hidden parameters
+
+The keys could go after the parameters of the statement, and a name of
+a query around could compile to a parameter. Each number of a
+parameter is fixed when it compiles, and the count of the parameters
+of a run is not. A parameter ?N past the given ones would then read a
+key, a wrong value with no error. The frame has its own slots.
+
+### Rejected: keep each answer of a correlated subquery
+
+A map from keys to answers would also save the runs for keys that come
+back later, as 1 after 2 above. It holds every answer in memory until
+the statement ends. The last answer alone costs nothing, and an index
+on the column that the subquery compares makes a run cheap.
 
 ## Indexes
 
