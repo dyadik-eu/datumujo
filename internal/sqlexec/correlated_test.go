@@ -169,3 +169,45 @@ func TestSameValues(t *testing.T) {
 		}
 	}
 }
+
+// TestCorrelatedWrites checks correlated subqueries in UPDATE and DELETE.
+// Each reads the table as it was before the statement: UPDATE computes
+// every new row before it writes the first, and DELETE finds every row
+// first. In SQLite 3.54.0, the UPDATE of s below gives 1, 3, 7: each row
+// sees the rows written before it. Here it gives 1, 3, 6, the sums over
+// the old rows, whatever the order of the rows. The other results are
+// those of SQLite.
+func TestCorrelatedWrites(t *testing.T) {
+	ss := newSession(t, store.Options{})
+	ss.must("CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER)")
+	ss.must("INSERT INTO t VALUES (1, 1), (2, 2), (3, 3)")
+	ss.must("CREATE TABLE u (k INTEGER, v INTEGER)")
+	ss.must("INSERT INTO u VALUES (1, 5), (1, 6), (2, 7)")
+	for _, c := range []struct {
+		src, table, want string
+		n                int64
+	}{
+		{"UPDATE t SET a = (SELECT max(v) FROM u WHERE u.k = t.id) WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.id)", "t", "1 6\n2 7\n3 3\n", 2},
+		{"DELETE FROM u WHERE v < (SELECT max(w.v) FROM u AS w WHERE w.k = u.k)", "u", "2 1 6\n3 2 7\n", 1},
+		{"DELETE FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE u.k = t.id)", "t", "1 6\n2 7\n", 1},
+		{"CREATE TABLE s (id INTEGER PRIMARY KEY, a INTEGER)", "", "", 0},
+		{"INSERT INTO s VALUES (1, 1), (2, 2), (3, 3)", "", "", 3},
+		{"UPDATE s SET a = (SELECT sum(w.a) FROM s AS w WHERE w.id <= s.id)", "s", "1 1\n2 3\n3 6\n", 3},
+	} {
+		r, err := ss.exec(c.src)
+		if err != nil {
+			t.Fatalf("%s: %v", c.src, err)
+		}
+		if r.RowsAffected != c.n {
+			t.Errorf("%s: %d rows, want %d", c.src, r.RowsAffected, c.n)
+		}
+		if c.table != "" {
+			if got := ss.dump(c.table); got != c.want {
+				t.Errorf("%s: %s is\n%s want\n%s", c.src, c.table, got, c.want)
+			}
+		}
+	}
+	// INSERT ... VALUES has no row of its table to read, as in SQLite.
+	failsAt(t, ss, "INSERT INTO t VALUES (5, (SELECT t.id))", 1, 34, "no such column: t.id", nil)
+	failsAt(t, ss, "INSERT INTO t VALUES (5, (SELECT a))", 1, 34, "no such column: a", nil)
+}
