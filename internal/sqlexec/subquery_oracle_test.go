@@ -112,10 +112,52 @@ func (g subqueryGen) exists() string {
 	)
 }
 
+// corrValue is a subquery of at most one INTEGER row that reads the row
+// of p around it. With other, it reads no table but q, for UPDATE p.
+func (g subqueryGen) corrValue(other bool) string {
+	vs := []string{
+		"(SELECT max(x) FROM q WHERE q.x <= p.a)",
+		"(SELECT count(*) FROM q WHERE q.y = p.b)",
+		"(SELECT min(x) FROM q WHERE q.y = p.b AND q.x > p.id - 5)",
+	}
+	if !other {
+		vs = append(vs,
+			"(SELECT w.a FROM p AS w WHERE w.id = p.a)",
+			"(SELECT count(*) FROM q WHERE EXISTS (SELECT 1 FROM p AS w WHERE w.a = q.x AND w.b = p.b))",
+		)
+	}
+	return vs[g.r.Intn(len(vs))]
+}
+
+// corrExists is EXISTS over a subquery that reads the row of p around it.
+func (g subqueryGen) corrExists() string {
+	return g.pick("", "NOT ") + g.pick(
+		"EXISTS (SELECT 1 FROM q WHERE q.x = p.a)",
+		"EXISTS (SELECT 1 FROM q WHERE q.y = p.b AND q.x > p.a)",
+		"EXISTS (SELECT 1 FROM p AS w WHERE w.a = p.a AND w.id <> p.id)",
+	)
+}
+
+// corrSet is a subquery of INTEGER rows for IN that reads the row of p
+// around it.
+func (g subqueryGen) corrSet() string {
+	return g.pick(
+		"(SELECT x FROM q WHERE q.y = p.b)",
+		"(SELECT w.a FROM p AS w WHERE w.b = p.b AND w.id <> p.id)",
+		"(SELECT x FROM q WHERE q.x > p.id)",
+	)
+}
+
 // cond is a condition on a row of p.
 func (g subqueryGen) cond() string {
 	one := func() string {
-		switch g.r.Intn(9) {
+		switch g.r.Intn(12) {
+		case 9:
+			return "a " + g.pick("=", "<", ">=") + " " + g.corrValue(false)
+		case 10:
+			return g.corrExists()
+		case 11:
+			return "a " + g.pick("IN", "NOT IN") + " " + g.corrSet()
 		case 0:
 			return "a " + g.pick("IN", "NOT IN") + " " + g.numSet(true)
 		case 1:
@@ -145,7 +187,13 @@ func (g subqueryGen) cond() string {
 
 // item is a column of a query over p.
 func (g subqueryGen) item() string {
-	switch g.r.Intn(6) {
+	switch g.r.Intn(9) {
+	case 6:
+		return g.corrValue(false)
+	case 7:
+		return g.corrExists()
+	case 8:
+		return "a IN " + g.corrSet()
 	case 0:
 		return "a IN " + g.numSet(true)
 	case 1:
@@ -186,11 +234,19 @@ func subqueryAgainstSQLite(t *testing.T, seed int64) {
 		case n < 10:
 			steps = append(steps, step{src: "INSERT INTO q VALUES (" + g.pick(g.num(), g.numValue()) + ", " + g.text() + "), (" + g.numValue() + ", " + g.textValue() + ")"})
 		case n < 14:
-			steps = append(steps, step{src: "UPDATE p SET a = " + g.pick(g.num(), g.numValue()) + " WHERE " + g.cond()})
+			// A value of SET reads no row of p but its own: SQLite lets a
+			// row see the rows that the UPDATE wrote before it.
+			steps = append(steps, step{src: "UPDATE p SET a = " + g.pick(g.num(), g.numValue(), g.corrValue(true)) + " WHERE " + g.cond()})
 		case n < 15:
 			steps = append(steps, step{src: "DELETE FROM p WHERE " + g.cond()})
 		case n < 16:
-			steps = append(steps, step{src: "DELETE FROM q WHERE x " + g.pick("IN", "NOT IN") + " " + g.numSet(true)})
+			steps = append(steps, step{src: "DELETE FROM q WHERE " + g.pick(
+				"x "+g.pick("IN", "NOT IN")+" "+g.numSet(true),
+				"NOT EXISTS (SELECT 1 FROM p WHERE p.a = q.x)",
+				"q.x > (SELECT count(*) FROM p WHERE p.b = q.y)")})
+		case n < 17:
+			// b is the second key: its slot is not the first one.
+			steps = append(steps, step{src: "SELECT a, b, count(*), (SELECT count(*) FROM q WHERE q.y = p.b), (SELECT max(x) FROM q WHERE q.y = b AND q.x <> p.a) FROM p GROUP BY a, b", query: true, cols: 5})
 		case n < 34:
 			items := []string{"id", "a", "b"}
 			for k := g.r.Intn(3); k > 0; k-- {
@@ -199,8 +255,13 @@ func subqueryAgainstSQLite(t *testing.T, seed int64) {
 			steps = append(steps, step{src: "SELECT " + strings.Join(items, ", ") + " FROM p WHERE " + g.cond() + " ORDER BY id", query: true, cols: len(items), ordered: true})
 		default:
 			cond := "x " + g.pick("IN", "NOT IN") + " " + g.numSet(true)
-			if g.r.Intn(2) == 0 {
+			switch g.r.Intn(4) {
+			case 0:
 				cond = "y = " + g.textValue()
+			case 1:
+				cond = g.pick("", "NOT ") + "EXISTS (SELECT 1 FROM p WHERE p.a = q.x AND p.b = q.y)"
+			case 2:
+				cond = "q.x <= (SELECT count(*) FROM p WHERE p.b = q.y OR p.a = q.x)"
 			}
 			steps = append(steps, step{src: "SELECT x, y, x IN " + g.numSet(true) + " FROM q WHERE " + cond, query: true, cols: 3})
 		}
@@ -239,7 +300,7 @@ func subqueryAgainstSQLite(t *testing.T, seed int64) {
 	}
 
 	ss := newSession(t, store.Options{})
-	queries, writes, failed, rows, nulls := 0, 0, 0, 0, 0
+	queries, writes, failed, rows, nulls, correlated := 0, 0, 0, 0, 0, 0
 	for i, s := range steps {
 		msg, theyFailed := sqliteErrs[i+1]
 		var err error
@@ -271,10 +332,13 @@ func subqueryAgainstSQLite(t *testing.T, seed int64) {
 		}
 		if err != nil {
 			failed++
+		} else if strings.Contains(s.src, "p.") || strings.Contains(s.src, "q.") {
+			// Only a correlated subquery names p or q with its table.
+			correlated++
 		}
 	}
-	t.Logf("%d steps: %d queries with %d rows and %d NULL values, %d writes, %d failed in both", len(steps), queries, rows, nulls, writes, failed)
-	if queries < 150 || writes < 80 || rows < 500 || nulls < 100 {
-		t.Errorf("a weak script: %d queries, %d rows, %d NULL values, %d writes", queries, rows, nulls, writes)
+	t.Logf("%d steps: %d queries with %d rows and %d NULL values, %d writes, %d failed in both, %d correlated", len(steps), queries, rows, nulls, writes, failed, correlated)
+	if queries < 150 || writes < 80 || rows < 500 || nulls < 100 || correlated < 100 {
+		t.Errorf("a weak script: %d queries, %d rows, %d NULL values, %d writes, %d correlated", queries, rows, nulls, writes, correlated)
 	}
 }
