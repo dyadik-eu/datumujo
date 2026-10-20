@@ -61,7 +61,6 @@ func TestInSubquery(t *testing.T) {
 		// A type known only at run time: x, or the values of the set.
 		{"SELECT ? IN (SELECT s FROM t)", []any{int64(1)}, 1, 14, "do not compare"},
 		{"SELECT 1 IN (SELECT CASE WHEN id = 1 THEN ?1 ELSE ?2 END FROM t)", []any{int64(1), "x"}, 1, 14, "IN: the subquery (SELECT CASE WHEN (id = 1) THEN ?1 ELSE ?2 END FROM t) gives INTEGER and TEXT; they do not compare"},
-		{"SELECT id FROM t WHERE id IN (SELECT x FROM e WHERE x = a)", nil, 1, 57, "roadmap step 32"},
 		{"SELECT 1 IN (SELECT 1 / 0)", nil, 1, 23, "division by zero"},
 	} {
 		_, err := ss.query(c.src, c.params...)
@@ -134,9 +133,6 @@ func TestScalarSubquery(t *testing.T) {
 		{"SELECT x FROM e WHERE (SELECT s FROM t WHERE id = 1) = 1", 1, 56, "do not compare"},
 		{"SELECT (SELECT 1 / 0)", 1, 18, "division by zero"},
 		{"SELECT (SELECT nosuch FROM t)", 1, 16, "no such column: nosuch"},
-		{"SELECT id FROM t WHERE (SELECT a FROM e) = 1", 1, 32, "a subquery that reads a column of the query around it is not supported yet (roadmap step 32)"},
-		{"SELECT id FROM t WHERE EXISTS (SELECT 1 FROM e WHERE x = id)", 1, 58, "roadmap step 32"},
-		{"SELECT (SELECT (SELECT s) FROM e) FROM t", 1, 24, "roadmap step 32"},
 	} {
 		_, err := ss.query(c.src)
 		var e *sqlparse.Error

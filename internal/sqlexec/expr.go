@@ -1,6 +1,7 @@
 package sqlexec
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -45,8 +46,13 @@ func (noColumns) Column(t, name string) (int, table.Type, error) {
 	if t != "" {
 		name = t + "." + name
 	}
-	return 0, 0, fmt.Errorf("no such column: %s", name)
+	return 0, 0, fmt.Errorf("%w: %s", errNoColumn, name)
 }
+
+// errNoColumn is the error of a resolver that does not know a name. Only
+// such a name can be a column of a query around. A name that is
+// ambiguous, or must be in GROUP BY, is an error where it stands.
+var errNoColumn = errors.New("no such column")
 
 // Expr is a compiled expression.
 type Expr struct{ n node }
@@ -90,6 +96,9 @@ func (x *Expr) Eval(row, params []any) (any, error) {
 type compiler struct {
 	r    Resolver
 	subs *subqueries // nil where no subquery can run
+	// own is set where a name of a query around is no column, as in
+	// LIMIT and OFFSET, as in SQLite.
+	own bool
 }
 
 func known(t table.Type) node { return node{typ: t, known: true} }
@@ -239,8 +248,8 @@ func (c *compiler) node(e sqlparse.Expr) (node, error) {
 	case *sqlparse.ColumnRef:
 		i, t, err := c.r.Column(x.Table, x.Name)
 		if err != nil {
-			if c.outerColumn(x.Table, x.Name) {
-				return node{}, notYet(x.At, "a subquery that reads a column of the query around it", 32)
+			if n, ok := c.outer(x, err); ok {
+				return n, nil
 			}
 			return node{}, errAt(x.At, "%v", err)
 		}

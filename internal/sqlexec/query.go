@@ -98,9 +98,9 @@ func (s scope) Column(tbl, name string) (int, table.Type, error) {
 	}
 	if found < 0 {
 		if tbl != "" {
-			return 0, 0, fmt.Errorf("no such column: %s.%s", tbl, name)
+			return 0, 0, fmt.Errorf("%w: %s.%s", errNoColumn, tbl, name)
 		}
-		return 0, 0, fmt.Errorf("no such column: %s", name)
+		return 0, 0, fmt.Errorf("%w: %s", errNoColumn, name)
 	}
 	return found, typ, nil
 }
@@ -167,9 +167,14 @@ func prepare(sc *table.Schema, st *sqlparse.Select, lim Limits, outers []Resolve
 			if err := q.addSource(sc, j.Table, j.Left); err != nil {
 				return nil, err
 			}
+		}
+		// A name of any table of the query is never one of a query
+		// around, also in an ON before its table.
+		q.subs.local = scope{q.srcs}
+		for i, j := range st.Joins {
 			// ON reads the tables up to its own, not those after it.
-			src := q.srcs[len(q.srcs)-1]
-			on, err := compileWith(j.On, scope{q.srcs}, q.subs)
+			src := q.srcs[i+1]
+			on, err := compileWith(j.On, scope{q.srcs[:i+2]}, q.subs)
 			if err != nil {
 				return nil, err
 			}
@@ -301,12 +306,15 @@ func (q *Query) orderKey(o sqlparse.Order, s scope) (orderKey, error) {
 	return k, nil
 }
 
-// bound compiles LIMIT or OFFSET. It reads no column.
+// bound compiles LIMIT or OFFSET. It reads no column, also none of a
+// query around, as in SQLite.
 func bound(e sqlparse.Expr, what string, subs *subqueries) (*Expr, error) {
-	x, err := compileWith(e, nil, subs)
+	c := &compiler{r: noColumns{}, subs: subs, own: true}
+	n, err := c.expr(e)
 	if err != nil {
 		return nil, err
 	}
+	x := &Expr{n}
 	if typ, ok := x.Type(); ok && typ != table.Int64 {
 		return nil, errAt(e.Pos(), "%s needs INTEGER, and %s is %s", what, e, TypeName(typ))
 	}

@@ -1,6 +1,7 @@
 package sqlexec
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -184,6 +185,9 @@ func (g *groupPlan) addAggregate(c *sqlparse.Call, rows Resolver) (Column, error
 			if hasAggregate(arg) {
 				return col, errAt(arg.Pos(), "an aggregate inside the aggregate %s", c.Name)
 			}
+		}
+		if onlyOuter(c.Args[0], rows, g.subs.outers) {
+			return col, wrap(c.At, ErrStatement, "%s reads only columns of the query around it; such an aggregate is not supported", c)
 		}
 		x, err := compileWith(c.Args[0], rows, g.subs)
 		if err != nil {
@@ -575,4 +579,34 @@ func (q *Query) orderTarget(o sqlparse.Order) int {
 		}
 	}
 	return -1
+}
+
+// onlyOuter reports whether e reads columns, and each is a column of a
+// query around, one of outers, and none a column of rows.
+// SQLite makes such an aggregate one of the query around, so
+// SELECT (SELECT sum(t.a)) FROM t sums t.a over all rows of t. Run here
+// as an aggregate of the subquery, it would sum one value of t.a. The
+// subquery inside e is no part of it: its names are its own.
+func onlyOuter(e sqlparse.Expr, rows Resolver, outers []Resolver) bool {
+	outer, other := false, false
+	rewrite(e, func(x sqlparse.Expr) (sqlparse.Expr, bool) {
+		ref, ok := x.(*sqlparse.ColumnRef)
+		if !ok {
+			return nil, false
+		}
+		if _, _, err := rows.Column(ref.Table, ref.Name); !errors.Is(err, errNoColumn) {
+			other = true
+			return x, true
+		}
+		known := false
+		for _, r := range outers {
+			if _, _, err := r.Column(ref.Table, ref.Name); !errors.Is(err, errNoColumn) {
+				known = true
+			}
+		}
+		outer = outer || known
+		other = other || !known
+		return x, true
+	})
+	return outer && !other
 }
