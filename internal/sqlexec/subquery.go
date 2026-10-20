@@ -158,7 +158,7 @@ func (s *subquery) run(e *env, max int) error {
 // If this query does not know a name either, the name becomes a slot of
 // its own frame. So a subquery can read any query around it.
 func (c *compiler) prepare(at sqlparse.At, sel *sqlparse.Select) (*subquery, error) {
-	if c.subs == nil {
+	if c.subs == nil || c.noSub {
 		return nil, errAt(at, "a subquery cannot run here")
 	}
 	outers := append(slices.Clone(c.subs.outers), c.r)

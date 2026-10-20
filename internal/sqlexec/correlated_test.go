@@ -2,6 +2,7 @@ package sqlexec
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/dyadik-eu/datumujo/internal/sqlparse"
 	"github.com/dyadik-eu/datumujo/internal/store"
+	"github.com/dyadik-eu/datumujo/internal/table"
 )
 
 // correlatedSession holds the tables of the tests of correlated
@@ -256,5 +258,87 @@ func TestCorrelatedGroups(t *testing.T) {
 		if !errors.As(err, &e) || e.At.Line != c.line || e.At.Col != c.col || !strings.Contains(e.Error(), c.msg) {
 			t.Errorf("%s: %v\n want line %d, column %d: ...%s...", c.src, err, c.line, c.col, c.msg)
 		}
+	}
+}
+
+// scanLog notes the options of each scan of one table.
+type scanLog struct {
+	*table.Tx
+	table string
+	log   []string
+}
+
+func (s *scanLog) Scan(name string, o table.Options) (*table.Rows, error) {
+	if name == s.table {
+		s.log = append(s.log, fmt.Sprintf("%s %v %v", o.Index, o.Prefix, o.From))
+	}
+	return s.Tx.Scan(name, o)
+}
+
+// TestCorrelatedPlan: a correlated subquery reads its table by an index
+// with the values of the row it runs for, not all rows for each row. It
+// gives the rows that a scan of all rows gives.
+func TestCorrelatedPlan(t *testing.T) {
+	ss := correlatedSession(t)
+	ss.must("CREATE INDEX u_k ON u (k)")
+	for _, c := range []struct {
+		src  string
+		want string
+		log  []string
+	}{
+		{"SELECT id, (SELECT max(v) FROM u WHERE u.k = t.id) FROM t", "1 6\n2 7\n3 NULL\n",
+			[]string{"u_k [1] []", "u_k [2] []", "u_k [3] []"}},
+		{"SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE k > t.id)", "1\n",
+			[]string{"u_k [] [1]", "u_k [] [2]", "u_k [] [3]"}},
+		{"SELECT id FROM t WHERE 6 IN (SELECT v FROM u WHERE t.id = k)", "1\n",
+			[]string{"u_k [1] []", "u_k [2] []", "u_k [3] []"}},
+		// Two levels: the inner subquery reads u by t.a of the outer query.
+		// For t.a NULL, u.k = NULL holds for no row, and u is not read.
+		{"SELECT id, (SELECT (SELECT count(*) FROM u WHERE u.k = t.a / 10) FROM m) FROM t", "1 2\n2 1\n3 0\n",
+			[]string{"u_k [1] []", "u_k [2] []"}},
+	} {
+		for _, noIndex := range []bool{false, true} {
+			st, err := sqlparse.Parse(c.src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			q, err := Prepare(ss.tx.Schema(), st.(*sqlparse.Select), Limits{NoIndex: noIndex})
+			if err != nil {
+				t.Fatalf("%s: %v", c.src, err)
+			}
+			src := &scanLog{Tx: ss.tx, table: "u"}
+			rows, err := q.Run(src, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var b strings.Builder
+			for rows.Next() {
+				for i, v := range rows.Row() {
+					if i > 0 {
+						b.WriteString(" ")
+					}
+					b.WriteString(sqlLiteral(v))
+				}
+				b.WriteString("\n")
+			}
+			if err := rows.Err(); err != nil || b.String() != c.want {
+				t.Errorf("%s, NoIndex %v: %q %v, want %q", c.src, noIndex, b.String(), err, c.want)
+			}
+			if !noIndex && strings.Join(src.log, ", ") != strings.Join(c.log, ", ") {
+				t.Errorf("%s: scans of u\n %s\nwant\n %s", c.src, strings.Join(src.log, ", "), strings.Join(c.log, ", "))
+			}
+		}
+	}
+}
+
+// TestPlanValueNoSubquery: a value of the planner holds no subquery. The
+// subquery below gives three rows, an error for a value. Over an empty
+// table no row needs it, so it never runs, also with an index on x.
+func TestPlanValueNoSubquery(t *testing.T) {
+	ss := correlatedSession(t)
+	ss.must("CREATE TABLE e (x INTEGER)")
+	ss.must("CREATE INDEX e_x ON e (x)")
+	if got, err := ss.query("SELECT x FROM e WHERE x = (SELECT a FROM t)"); err != nil || got != "" {
+		t.Errorf("%q %v", got, err)
 	}
 }

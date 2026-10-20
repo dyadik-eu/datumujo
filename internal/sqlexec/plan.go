@@ -80,7 +80,7 @@ type constraint struct {
 // table with a value that reads no column. Only terms joined by AND
 // count: each of them must hold for a row to pass.
 func constraints(where sqlparse.Expr, s Resolver) []constraint {
-	return constraintsFor([]sqlparse.Expr{where}, s, nil, 0, math.MaxInt)
+	return constraintsFor([]sqlparse.Expr{where}, s, nil, 0, math.MaxInt, nil)
 }
 
 // constraintsFor returns the terms of the expressions that compare a
@@ -89,8 +89,10 @@ func constraints(where sqlparse.Expr, s Resolver) []constraint {
 // the tables before it, which prefix resolves, and no other column. A
 // scan of the table runs once for each row of those tables. A nil prefix
 // allows no column. The column of a constraint counts from 0 in its
-// table.
-func constraintsFor(exprs []sqlparse.Expr, full, prefix Resolver, lo, hi int) []constraint {
+// table. With subs, a value may read the queries around, through the
+// frame of subs. A correlated subquery then scans only the rows of the
+// row it runs for. A value holds no subquery in either case.
+func constraintsFor(exprs []sqlparse.Expr, full, prefix Resolver, lo, hi int, subs *subqueries) []constraint {
 	var out []constraint
 	var walk func(e sqlparse.Expr)
 	col := func(e sqlparse.Expr) (int, bool) {
@@ -105,8 +107,12 @@ func constraintsFor(exprs []sqlparse.Expr, full, prefix Resolver, lo, hi int) []
 		return i - lo, true
 	}
 	value := func(e sqlparse.Expr) (*Expr, bool) {
-		x, err := Compile(e, prefix)
-		return x, err == nil
+		if prefix == nil {
+			prefix = noColumns{}
+		}
+		c := &compiler{r: prefix, subs: subs, noSub: true}
+		n, err := c.expr(e)
+		return &Expr{n}, err == nil
 	}
 	flip := map[string]string{"=": "=", "<": ">", "<=": ">=", ">": "<", ">=": "<="}
 	walk = func(e sqlparse.Expr) {
@@ -386,7 +392,7 @@ func (q *Query) plan(s Resolver, lim Limits) {
 		if src.onSt != nil {
 			exprs = append(exprs, src.onSt)
 		}
-		cs := constraintsFor(exprs, s, scope{q.srcs[:i]}, src.offset, src.offset+len(src.t.Columns))
+		cs := constraintsFor(exprs, s, scope{q.srcs[:i]}, src.offset, src.offset+len(src.t.Columns), q.subs)
 		src.access = choose(src.t, cs)
 	}
 	if len(q.srcs) > 1 {

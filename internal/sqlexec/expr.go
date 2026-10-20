@@ -99,6 +99,9 @@ type compiler struct {
 	// own is set where a name of a query around is no column, as in
 	// LIMIT and OFFSET, as in SQLite.
 	own bool
+	// noSub is set where a name of a query around is a column, but no
+	// subquery can run: in a value of the planner.
+	noSub bool
 }
 
 func known(t table.Type) node { return node{typ: t, known: true} }
