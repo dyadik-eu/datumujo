@@ -29,10 +29,10 @@ the API and the file format can change in any release.
 - UNIQUE on a column and on a table in SQL. Each is a unique index
   called `<table>_unique_<n>`; an INSERT or UPDATE that breaks it fails
   with `ErrUnique`. See "Unique" in [docs/sql.md](docs/sql.md).
-- Subqueries in SQL that read no column of the query around them:
-  `(SELECT ...)` as a value, `EXISTS (SELECT ...)` and
-  `x IN (SELECT ...)`. A subquery as a value with more than one row is
-  an error. See "Subqueries" in [docs/sql.md](docs/sql.md).
+- Subqueries in SQL: `(SELECT ...)` as a value, `EXISTS (SELECT ...)`
+  and `x IN (SELECT ...)`. A subquery can read the columns of the
+  queries around it. A subquery as a value with more than one row is an
+  error. See "Subqueries" in [docs/sql.md](docs/sql.md).
 - `datumujo check` and `Stats.FormatVersion` report the format version.
 
 ### Changed
@@ -40,6 +40,9 @@ the API and the file format can change in any release.
 - An SQL INSERT computes the values of all its rows before it writes
   the first one. A subquery in it sees the table as it was before the
   statement, as in SQLite.
+- With GROUP BY, a key that is one column is found however it is
+  written: `SELECT t.a FROM t GROUP BY a` works now. Before, it failed
+  with "column t.a must be in GROUP BY".
 
 ### Fixed
 

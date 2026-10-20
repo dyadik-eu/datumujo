@@ -1,33 +1,52 @@
 package sqlexec
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/dyadik-eu/datumujo/internal/sqlparse"
 	"github.com/dyadik-eu/datumujo/internal/table"
 )
 
-// Subqueries (L-16). A subquery here reads no column of the query around
-// it, so each run of its statement gives it one answer. It runs once, at
-// its first use, and keeps the answer for the rest of the run, as in
-// SQLite. A subquery that no row needs, as in a branch of CASE that is
-// never taken, never runs.
+// Subqueries (L-16). A subquery runs at its first use in a run of its
+// statement and keeps its answer. A subquery that no row needs, as in a
+// branch of CASE that is never taken, never runs.
+//
+// A subquery may read columns of the queries around it: it is then
+// correlated. Each such name is a slot of its frame. Before each run,
+// the query around fills the frame from the row it is at. The
+// subquery runs again when those values change, and keeps its answer
+// while they stay the same. One that reads no column of a query around
+// has no slot, so it runs once in a run of its statement.
 //
 // A subquery reads the state before its statement writes anything:
 // INSERT computes all its rows first, and UPDATE and DELETE find all
-// their rows before the first write.
+// their rows and compute their new values before the first write.
 
-// subqueries holds the subqueries of one statement. It also holds what
-// they need: the schema and limits to prepare them, and the resolvers of
-// the queries around (innermost last).
+// subqueries holds the subqueries of one query or statement. It also
+// holds the schema and limits to prepare them. The field outers holds
+// the resolvers of the queries around, the innermost last. The field
+// refs holds the names of the queries around that this query reads, and
+// frame their values in the current run.
 type subqueries struct {
 	sc     *table.Schema
 	lim    Limits
 	outers []Resolver
+	local  Resolver // all tables of the query; nil for a statement
 	list   []*subquery
+	refs   []outerRef
+	frame  []any
+}
+
+// outerRef is a name that a query reads from a query around it.
+type outerRef struct {
+	at          sqlparse.At
+	table, name string
 }
 
 func newSubqueries(sc *table.Schema, lim Limits, outers []Resolver) *subqueries {
@@ -38,35 +57,89 @@ func newSubqueries(sc *table.Schema, lim Limits, outers []Resolver) *subqueries 
 // with params at its next use.
 func (s *subqueries) bind(src Source, params []any) {
 	for _, sub := range s.list {
-		*sub = subquery{q: sub.q, at: sub.at, text: sub.text, src: src, params: params, bound: true}
+		*sub = subquery{q: sub.q, at: sub.at, text: sub.text, keys: sub.keys, src: src, params: params, bound: true}
 	}
 }
 
 // subquery is one subquery of a statement, with its answer for the
-// current run.
+// current run. keys compute the values of its frame from the row of the
+// query around.
 type subquery struct {
 	q    *Query
 	at   sqlparse.At
 	text string
+	keys []node
 
 	src    Source
 	params []any
 	bound  bool
 	done   bool
+	last   []any   // the frame of the answer
 	rows   [][]any // at most two: enough to tell one row from more
 	err    error
 	set    *inSet // the answer after IN, once read
 }
 
-// run runs the subquery once per run and reads at most max rows of it.
-func (s *subquery) run(max int) error {
+// fresh fills the frame from the row of e. It reports whether the
+// answer of the last run holds for it: the same values in each slot.
+func (s *subquery) fresh(e *env) (bool, error) {
 	if !s.bound {
-		return fmt.Errorf("sqlexec: the subquery %s ran before its statement started", s.text)
+		return false, fmt.Errorf("sqlexec: the subquery %s ran before its statement started", s.text)
 	}
-	if s.done {
+	vals := make([]any, len(s.keys))
+	for i, k := range s.keys {
+		v, err := k.eval(e)
+		if err != nil {
+			return false, err
+		}
+		vals[i] = v
+	}
+	if s.done && sameValues(vals, s.last) {
+		return true, nil
+	}
+	s.done, s.last, s.rows, s.set, s.err = true, vals, nil, nil, nil
+	s.q.subs.frame = vals
+	return false, nil
+}
+
+// sameValues reports whether two frames hold the same values, bit for
+// bit: -0.0 and 0.0 give different answers, and NaN is never the same.
+func sameValues(a, b []any) bool {
+	for i := range a {
+		switch x := a[i].(type) {
+		case float64:
+			y, ok := b[i].(float64)
+			if !ok || x != y || math.Float64bits(x) != math.Float64bits(y) {
+				return false
+			}
+		case []byte:
+			y, ok := b[i].([]byte)
+			if !ok || !bytes.Equal(x, y) {
+				return false
+			}
+		case time.Time:
+			y, ok := b[i].(time.Time)
+			if !ok || !x.Equal(y) || x.Location() != y.Location() {
+				return false
+			}
+		default:
+			if a[i] != b[i] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// run runs the subquery for the row of e and reads at most max rows of
+// it.
+func (s *subquery) run(e *env, max int) error {
+	if ok, err := s.fresh(e); ok || err != nil {
+		if err != nil {
+			return err
+		}
 		return s.err
 	}
-	s.done = true
 	rows, err := s.q.Run(s.src, s.params)
 	if err != nil {
 		s.err = err
@@ -80,10 +153,12 @@ func (s *subquery) run(max int) error {
 }
 
 // prepare compiles the SELECT of a subquery. The resolver of the
-// expression around becomes one of its outers. A name that only the
-// query around knows is a correlated subquery, roadmap step 32.
+// expression around becomes one of its outers. Each name the subquery
+// reads from a query around then compiles here, as a key of its frame.
+// If this query does not know a name either, the name becomes a slot of
+// its own frame. So a subquery can read any query around it.
 func (c *compiler) prepare(at sqlparse.At, sel *sqlparse.Select) (*subquery, error) {
-	if c.subs == nil {
+	if c.subs == nil || c.noSub {
 		return nil, errAt(at, "a subquery cannot run here")
 	}
 	outers := append(slices.Clone(c.subs.outers), c.r)
@@ -92,25 +167,56 @@ func (c *compiler) prepare(at sqlparse.At, sel *sqlparse.Select) (*subquery, err
 		return nil, err
 	}
 	sub := &subquery{q: q, at: at, text: "(" + sel.String() + ")"}
+	for _, ref := range q.subs.refs {
+		k, err := c.expr(&sqlparse.ColumnRef{At: ref.at, Table: ref.table, Name: ref.name})
+		if err != nil {
+			return nil, err
+		}
+		sub.keys = append(sub.keys, k)
+	}
 	c.subs.list = append(c.subs.list, sub)
 	return sub, nil
 }
 
-// outerColumn reports whether a name is a column of a query around. If
-// the resolver of c does not know it, it is a correlated subquery.
-func (c *compiler) outerColumn(tbl, name string) bool {
-	if c.subs == nil {
-		return false
+// outer compiles a name that the resolver of c does not know, err being
+// its answer. The name becomes a slot of the frame of this query. That
+// holds if no table of the query knows the name and a query around does.
+func (c *compiler) outer(x *sqlparse.ColumnRef, err error) (node, bool) {
+	if c.subs == nil || c.own || !errors.Is(err, errNoColumn) {
+		return node{}, false
 	}
-	for _, r := range c.subs.outers {
-		if r == nil {
-			continue
-		}
-		if _, _, err := r.Column(tbl, name); err == nil {
-			return true
+	if c.subs.local != nil {
+		if _, _, err := c.subs.local.Column(x.Table, x.Name); !errors.Is(err, errNoColumn) {
+			return node{}, false
 		}
 	}
-	return false
+	n, found := node{}, false
+	for i := len(c.subs.outers) - 1; i >= 0; i-- {
+		_, typ, err := c.subs.outers[i].Column(x.Table, x.Name)
+		if err == nil {
+			n, found = known(typ), true
+			break
+		}
+		if !errors.Is(err, errNoColumn) {
+			found = true // the query around reports its error
+			break
+		}
+	}
+	if !found {
+		return node{}, false
+	}
+	subs, j := c.subs, -1
+	for i, r := range subs.refs {
+		if r.table == x.Table && r.name == x.Name {
+			j = i
+		}
+	}
+	if j < 0 {
+		j = len(subs.refs)
+		subs.refs = append(subs.refs, outerRef{at: x.At, table: x.Table, name: x.Name})
+	}
+	n.eval = func(*env) (any, error) { return subs.frame[j], nil }
+	return n, true
 }
 
 // scalar compiles (SELECT ...) as a value: the one column of its row,
@@ -125,8 +231,8 @@ func (c *compiler) scalar(x *sqlparse.Subquery) (node, error) {
 		return node{}, errAt(x.At, "a subquery as a value gives one column, and %s gives %d", sub.text, len(cols))
 	}
 	n := node{typ: cols[0].Type, known: cols[0].Known}
-	n.eval = func(*env) (any, error) {
-		if err := sub.run(2); err != nil {
+	n.eval = func(e *env) (any, error) {
+		if err := sub.run(e, 2); err != nil {
 			return nil, err
 		}
 		switch len(sub.rows) {
@@ -147,8 +253,8 @@ func (c *compiler) exists(x *sqlparse.Exists) (node, error) {
 		return node{}, err
 	}
 	n := known(table.Bool)
-	n.eval = func(*env) (any, error) {
-		if err := sub.run(1); err != nil {
+	n.eval = func(e *env) (any, error) {
+		if err := sub.run(e, 1); err != nil {
 			return nil, err
 		}
 		return len(sub.rows) > 0, nil
@@ -163,17 +269,16 @@ type inSet struct {
 	unknown bool
 }
 
-// readSet reads all rows of the subquery once per run. The values count
-// toward the memory of the statement. They must compare with one
+// readSet reads all rows of the subquery for the row of e. The values
+// count toward the memory of the statement. They must compare with one
 // another: a column whose type is only known at run time may mix them.
-func (s *subquery) readSet(at sqlparse.At, lim Limits) (*inSet, error) {
-	if !s.bound {
-		return nil, fmt.Errorf("sqlexec: the subquery %s ran before its statement started", s.text)
-	}
-	if s.done {
+func (s *subquery) readSet(e *env, at sqlparse.At, lim Limits) (*inSet, error) {
+	if ok, err := s.fresh(e); ok || err != nil {
+		if err != nil {
+			return nil, err
+		}
 		return s.set, s.err
 	}
-	s.done = true
 	s.set, s.err = s.collect(at, lim)
 	return s.set, s.err
 }
@@ -263,7 +368,7 @@ func (c *compiler) inSelect(x *sqlparse.In, a node) (node, error) {
 		if err != nil {
 			return nil, err
 		}
-		set, err := sub.readSet(x.Select.At, lim)
+		set, err := sub.readSet(e, x.Select.At, lim)
 		if err != nil {
 			return nil, err
 		}

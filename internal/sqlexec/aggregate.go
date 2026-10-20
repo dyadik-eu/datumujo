@@ -1,6 +1,7 @@
 package sqlexec
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -114,15 +115,22 @@ type groupPlan struct {
 	slots map[string]int
 	types []Column
 	subs  *subqueries // of the query
+	rows  Resolver    // the columns of the table
+	cols  map[int]int // the slot of each column of the table that is a key
 }
 
-// groupScope resolves the columns of the group row. Any other column is
-// an error.
+// groupScope resolves the columns of the group row. A column of the
+// table that is a key of GROUP BY is its slot, however it is written: t.a
+// for GROUP BY a too, also in a subquery. Any other column is an error.
 type groupScope struct{ g *groupPlan }
 
 func (s groupScope) Column(tbl, name string) (int, table.Type, error) {
 	if tbl == sqlparse.Derived {
 		if i, ok := s.g.slots[name]; ok {
+			return i, s.g.types[i].Type, nil
+		}
+	} else if col, _, err := s.g.rows.Column(tbl, name); err == nil {
+		if i, ok := s.g.cols[col]; ok {
 			return i, s.g.types[i].Type, nil
 		}
 	}
@@ -184,6 +192,9 @@ func (g *groupPlan) addAggregate(c *sqlparse.Call, rows Resolver) (Column, error
 			if hasAggregate(arg) {
 				return col, errAt(arg.Pos(), "an aggregate inside the aggregate %s", c.Name)
 			}
+		}
+		if onlyOuter(c.Args[0], rows, g.subs.outers) {
+			return col, wrap(c.At, ErrStatement, "%s reads only columns of the query around it; such an aggregate is not supported", c)
 		}
 		x, err := compileWith(c.Args[0], rows, g.subs)
 		if err != nil {
@@ -456,7 +467,7 @@ func (q *Query) groups(read func() ([]any, bool, error), params []any) ([][]any,
 // prepareGroups compiles a query with GROUP BY, HAVING or an aggregate.
 // It sets the columns of the result, HAVING and ORDER BY of q.
 func (q *Query) prepareGroups(st *sqlparse.Select, rows Resolver) error {
-	g := &groupPlan{slots: map[string]int{}, subs: q.subs}
+	g := &groupPlan{slots: map[string]int{}, subs: q.subs, rows: rows, cols: map[int]int{}}
 	q.group = g
 	for _, e := range st.GroupBy {
 		if hasAggregate(e) {
@@ -473,6 +484,10 @@ func (q *Query) prepareGroups(st *sqlparse.Select, rows Resolver) error {
 			return err
 		}
 		typ, known := x.Type()
+		if ref, ok := e.(*sqlparse.ColumnRef); ok {
+			col, _, _ := rows.Column(ref.Table, ref.Name)
+			g.cols[col] = len(g.texts)
+		}
 		g.keys = append(g.keys, x)
 		g.slot(e.String(), Column{Name: e.String(), Type: typ, Known: known})
 	}
@@ -575,4 +590,34 @@ func (q *Query) orderTarget(o sqlparse.Order) int {
 		}
 	}
 	return -1
+}
+
+// onlyOuter reports whether e reads columns, and each is a column of a
+// query around, one of outers, and none a column of rows.
+// SQLite makes such an aggregate one of the query around, so
+// SELECT (SELECT sum(t.a)) FROM t sums t.a over all rows of t. Run here
+// as an aggregate of the subquery, it would sum one value of t.a. The
+// subquery inside e is no part of it: its names are its own.
+func onlyOuter(e sqlparse.Expr, rows Resolver, outers []Resolver) bool {
+	outer, other := false, false
+	rewrite(e, func(x sqlparse.Expr) (sqlparse.Expr, bool) {
+		ref, ok := x.(*sqlparse.ColumnRef)
+		if !ok {
+			return nil, false
+		}
+		if _, _, err := rows.Column(ref.Table, ref.Name); !errors.Is(err, errNoColumn) {
+			other = true
+			return x, true
+		}
+		known := false
+		for _, r := range outers {
+			if _, _, err := r.Column(ref.Table, ref.Name); !errors.Is(err, errNoColumn) {
+				known = true
+			}
+		}
+		outer = outer || known
+		other = other || !known
+		return x, true
+	})
+	return outer && !other
 }

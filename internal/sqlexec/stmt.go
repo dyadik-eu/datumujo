@@ -125,14 +125,14 @@ type tableScope struct{ t *table.Table }
 
 func (s tableScope) Column(tbl, name string) (int, table.Type, error) {
 	if tbl != "" && tbl != s.t.Name {
-		return 0, 0, fmt.Errorf("no such column: %s.%s", tbl, name)
+		return 0, 0, fmt.Errorf("%w: %s.%s", errNoColumn, tbl, name)
 	}
 	for i, c := range s.t.Columns {
 		if c.Name == name {
 			return i, c.Type, nil
 		}
 	}
-	return 0, 0, fmt.Errorf("no such column: %s", name)
+	return 0, 0, fmt.Errorf("%w: %s", errNoColumn, name)
 }
 
 func findTable(tx *table.Tx, at sqlparse.At, name string) (*table.Table, error) {

@@ -162,13 +162,37 @@ SQLite takes the first row. IN with an empty subquery is FALSE, even for
 NULL. Otherwise NULL in the subquery or as x gives NULL, unless a value
 equals x.
 
-A subquery runs once for each run of its statement, at its first use,
-and keeps its answer. One that no row needs does not run. It sees the
-tables as they were before the statement: an INSERT of three rows with
-`(SELECT count(*) FROM t)` gives each row the same count.
+A subquery can read the columns of the queries around it, as `t.id`
+here:
 
-A subquery reads no column of the query around it yet; that fails as
-not supported. A CHECK takes no subquery.
+```sql
+SELECT id, (SELECT max(v) FROM u WHERE u.k = t.id) FROM t
+```
+
+A name of a table of the subquery is never one of a query around. Of
+the queries around, the nearest that knows a name has it. In a query
+with GROUP BY, a subquery reads the keys of GROUP BY: `t.a` for
+`GROUP BY a` too. A key that is an expression, as `a + 1`, matches by
+its text only.
+
+A subquery runs at its first use, and keeps its answer while the values
+it reads from the queries around stay the same. One that reads none
+runs once for each run of its statement. One that no row needs does not
+run. An index can narrow the scan of a subquery. Above, an index on
+`u.k` reads only the rows of each `t.id`.
+
+A subquery sees the tables as they were before the statement. An
+INSERT of three rows with `(SELECT count(*) FROM t)` gives each row
+the same count. An UPDATE computes all new rows before it writes the
+first: a subquery that reads the table of the UPDATE sees no new row.
+SQLite lets each row see the rows written before it.
+
+Some subqueries are errors:
+
+- one in a CHECK
+- a column of a query around in LIMIT or OFFSET, as in SQLite
+- an aggregate that reads only columns of a query around, as
+  `(SELECT sum(t.a))`; SQLite makes it an aggregate of that query
 
 ## Types
 
@@ -279,7 +303,6 @@ byte more in an index.
 
 ## Not in stage 2
 
-- subqueries that read a column of the query around them
 - common table expressions, views, triggers, foreign keys
 - window functions, UNION, NATURAL and USING joins, upsert
 - a DEFAULT that is an expression, `INSERT ... DEFAULT VALUES`
