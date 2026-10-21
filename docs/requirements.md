@@ -163,6 +163,8 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | `SELECT (SELECT sum(t.a)) FROM t`, an aggregate over columns of the query around only | an aggregate of the query around | error: such an aggregate is not supported |
 | `t.a + 1` in a subquery with `GROUP BY a + 1` | the key `a + 1` | error: t.a must be in GROUP BY; a key that is an expression matches by its text |
 | ON that reads a table joined after it | taken | error: no such column; ON reads the tables up to its own |
+| a subquery in DO UPDATE of ON CONFLICT | taken; it sees the rows that the INSERT wrote before | error: a subquery cannot run here |
+| a column twice in SET, of UPDATE or DO UPDATE | the last value | error: column set twice |
 | an error inside a CHECK, such as `10 / 0` | NULL, so the row passes | error of the statement |
 | `CONSTRAINT name CHECK (...)` | a named check | not in the SQL |
 | `UNIQUE (a, a)` | taken | error when the table is made |

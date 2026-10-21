@@ -509,6 +509,40 @@ back later, as 1 after 2 above. It holds every answer in memory until
 the statement ends. The last answer alone costs nothing, and an index
 on the column that the subquery compares makes a run cheap.
 
+## On conflict
+
+`INSERT ... ON CONFLICT` looks for a conflict before it writes a row.
+The primary key is read with `Get`, a unique index with a scan that has
+the values of the row as its prefix. So the table layer needs no change
+for the step. The lookup runs after NOT NULL and the checks of the row,
+as in SQLite. A key with a NULL is not looked up, since a NULL
+conflicts with no row.
+
+The keys come from the schema when the statement compiles. Without a
+target, they are the primary key and then each unique index in its
+order. With a target, they are the one key with exactly those columns,
+and no other. A conflict on another key reaches `tx.Insert` and fails
+there with `ErrUnique`, as in SQLite.
+
+DO UPDATE compiles over two rows side by side: the row that is there,
+then the excluded row. `upsertScope` gives a name with the table or no
+table the first, and `excluded.c` the second. The new row passes NOT
+NULL and the checks, and a new key moves it, as in UPDATE.
+
+Each row of the INSERT looks up and writes before the next. So two rows
+of one INSERT with the same key give what SQLite gives: the second
+changes the row that the first wrote. The values of all rows still come
+first, as step 31 fixed. A subquery in DO UPDATE would break that rule,
+since it runs in the middle of the writes. So it is refused.
+
+### Rejected: insert, and handle ErrUnique
+
+`tx.Insert` fails on a conflict, and the error names the index. But it
+does not give the row, and it comes only for the first key that the
+table layer checks. Without a target, DO UPDATE must take the primary
+key first. With a target, a conflict on another key must fail. Both
+need the lookup in the order of the keys.
+
 ## Indexes
 
 An index is a tree of its own. The key of an entry is the index columns of

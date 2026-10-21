@@ -2,7 +2,7 @@
 
 This is the SQL of stage 2 and of the parts of stage 3 that are done.
 It says what the SQL has, how its values behave, and its limits. The requirements are
-L-1 to L-12, L-13 for DEFAULT, L-14 for CHECK, L-15 for UNIQUE and L-16 for subqueries, in [requirements.md](requirements.md). Each difference to SQLite is in the
+L-1 to L-12, L-13 for DEFAULT, L-14 for CHECK, L-15 for UNIQUE, L-16 for subqueries and L-17 for ON CONFLICT, in [requirements.md](requirements.md). Each difference to SQLite is in the
 oracle table there. How the parts work is in [design.md](design.md).
 
 ## Where SQL runs
@@ -29,6 +29,7 @@ DROP TABLE [IF EXISTS] t
 DROP INDEX [IF EXISTS] i
 ALTER TABLE t ADD [COLUMN] c TYPE [NOT NULL] [DEFAULT d] [CHECK (e)]
 INSERT INTO t [(c, ...)] VALUES (e, ...), ...
+  [ON CONFLICT [(c, ...)] DO NOTHING | DO UPDATE SET c = e, ... [WHERE e]]
 UPDATE t SET c = e, ... [WHERE e]
 DELETE FROM t [WHERE e]
 SELECT [DISTINCT] e [[AS] a], ... | * | t.*
@@ -194,6 +195,38 @@ Some subqueries are errors:
 - an aggregate that reads only columns of a query around, as
   `(SELECT sum(t.a))`; SQLite makes it an aggregate of that query
 
+## On conflict
+
+INSERT ... ON CONFLICT handles a row that has the key or the unique
+values of a row that is there. DO NOTHING skips the new row. DO UPDATE
+changes the row that is there.
+
+```sql
+CREATE TABLE stock (sku TEXT PRIMARY KEY, n INTEGER NOT NULL)
+INSERT INTO stock VALUES ('a', 3), ('a', 2)
+  ON CONFLICT (sku) DO UPDATE SET n = n + excluded.n
+```
+
+This gives one row, `'a'` with 5. In DO UPDATE, a column by its name or
+as `stock.n` is the row that is there. `excluded.n` is the row that the
+INSERT would have written, with the defaults of the columns it does not
+name. A WHERE after SET keeps the row when it is not TRUE.
+
+The target names the columns of the primary key or of one UNIQUE, in
+any order. A conflict on another key then fails with `ErrUnique`.
+Without a target, every key counts: DO UPDATE takes the row of the
+primary key first, then the UNIQUE in their order. A NULL in a UNIQUE
+conflicts with no row.
+
+The rows of one INSERT go in turn: a later row can conflict with one
+that an earlier row wrote or changed. A new row first passes NOT NULL
+and its checks, also when DO NOTHING would skip it. The row of DO
+UPDATE passes them too, and a new key moves it. The count of changed
+rows holds the rows written and the rows that DO UPDATE changed.
+
+DO UPDATE takes no subquery: it would run while the INSERT writes, and
+see the rows written before.
+
 ## Types
 
 | Type | Names | Go value |
@@ -304,7 +337,7 @@ byte more in an index.
 ## Not in stage 2
 
 - common table expressions, views, triggers, foreign keys
-- window functions, UNION, NATURAL and USING joins, upsert
+- window functions, UNION, NATURAL and USING joins
 - a DEFAULT that is an expression, `INSERT ... DEFAULT VALUES`
 - `CONSTRAINT` with a name
 

@@ -235,6 +235,17 @@ type Insert struct {
 	Table   string
 	Columns []string
 	Rows    [][]Expr
+	Upsert  *Upsert // ON CONFLICT; nil without
+}
+
+// Upsert is ON CONFLICT [(columns)] DO NOTHING, or DO UPDATE SET ...
+// [WHERE ...]. Without Target, it takes a conflict on any key.
+type Upsert struct {
+	At
+	Target  []string
+	Nothing bool
+	Set     []Assign
+	Where   Expr
 }
 
 // Update is UPDATE ... SET ... [WHERE].

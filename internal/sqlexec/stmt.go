@@ -453,6 +453,12 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any, lim Limits) (Result,
 	if err != nil {
 		return Result{}, err
 	}
+	var up *upsert
+	if s.Upsert != nil {
+		if up, err = newUpsert(t, s.Upsert); err != nil {
+			return Result{}, err
+		}
+	}
 	// Every value comes first, then every write: a subquery reads the
 	// table as it was before the statement, as in SQLite.
 	subs.bind(tx, params)
@@ -481,6 +487,26 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any, lim Limits) (Result,
 		}
 		if err := checkRow(t, cs, row, at); err != nil {
 			return Result{}, err
+		}
+		// The checks of the row come first, as in SQLite. A row with a NULL
+		// in a NOT NULL column fails also where DO NOTHING would skip it.
+		if up != nil {
+			old, err := up.conflict(tx, t, row)
+			if err != nil {
+				return Result{}, engineErr(at, err)
+			}
+			if old != nil {
+				if !up.nothing {
+					changed, err := up.update(tx, t, cs, old, row, params, at)
+					if err != nil {
+						return Result{}, err
+					}
+					if changed {
+						res.RowsAffected++
+					}
+				}
+				continue
+			}
 		}
 		if err := tx.Insert(t.Name, row); err != nil {
 			return Result{}, engineErr(at, err)
