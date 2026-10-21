@@ -33,6 +33,9 @@ the API and the file format can change in any release.
   and `x IN (SELECT ...)`. A subquery can read the columns of the
   queries around it. A subquery as a value with more than one row is an
   error. See "Subqueries" in [docs/sql.md](docs/sql.md).
+- `INSERT ... ON CONFLICT [(columns)] DO NOTHING` and
+  `DO UPDATE SET ... [WHERE ...]` with `excluded`. See "On conflict" in
+  [docs/sql.md](docs/sql.md).
 - `datumujo check` and `Stats.FormatVersion` report the format version.
 
 ### Changed
