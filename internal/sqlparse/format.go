@@ -242,6 +242,17 @@ func (s *Insert) String() string {
 		}
 		b.WriteString("(" + exprs(r) + ")")
 	}
+	if u := s.Upsert; u != nil {
+		b.WriteString(" ON CONFLICT")
+		if len(u.Target) > 0 {
+			b.WriteString(" (" + names(u.Target) + ")")
+		}
+		if u.Nothing {
+			b.WriteString(" DO NOTHING")
+		} else {
+			b.WriteString(" DO UPDATE SET " + assigns(u.Set) + where(u.Where))
+		}
+	}
 	return b.String()
 }
 
@@ -252,12 +263,16 @@ func where(e Expr) string {
 	return " WHERE " + e.String()
 }
 
-func (s *Update) String() string {
-	set := make([]string, len(s.Set))
-	for i, a := range s.Set {
+func assigns(as []Assign) string {
+	set := make([]string, len(as))
+	for i, a := range as {
 		set[i] = Name(a.Column) + " = " + a.Value.String()
 	}
-	return "UPDATE " + Name(s.Table) + " SET " + strings.Join(set, ", ") + where(s.Where)
+	return strings.Join(set, ", ")
+}
+
+func (s *Update) String() string {
+	return "UPDATE " + Name(s.Table) + " SET " + assigns(s.Set) + where(s.Where)
 }
 
 func (s *Delete) String() string { return "DELETE FROM " + Name(s.Table) + where(s.Where) }

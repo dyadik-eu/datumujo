@@ -611,12 +611,52 @@ func (p *parser) insert() (Statement, error) {
 		}
 		ins.Rows = append(ins.Rows, row)
 		if !p.isOp(",") {
-			return ins, nil
+			break
 		}
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
 	}
+	if p.isKw("ON") {
+		ins.Upsert, err = p.upsert()
+	}
+	return ins, err
+}
+
+// upsert reads ON CONFLICT [(columns)] DO NOTHING, or DO UPDATE SET ...
+// [WHERE ...]. CONFLICT, DO and NOTHING are words, not keywords.
+func (p *parser) upsert() (*Upsert, error) {
+	u := &Upsert{At: p.tok.at}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("conflict"); err != nil {
+		return nil, err
+	}
+	var err error
+	if p.isOp("(") {
+		if u.Target, err = p.names("a column name"); err != nil {
+			return nil, err
+		}
+	}
+	if err := p.expectWord("do"); err != nil {
+		return nil, err
+	}
+	if ok, err := p.acceptWord("nothing"); ok || err != nil {
+		u.Nothing = true
+		return u, err
+	}
+	if err := p.expect("UPDATE"); err != nil {
+		return nil, err
+	}
+	if err := p.expect("SET"); err != nil {
+		return nil, err
+	}
+	if u.Set, err = p.assigns(); err != nil {
+		return nil, err
+	}
+	u.Where, err = p.where()
+	return u, err
 }
 
 func (p *parser) exprList() ([]Expr, error) {
@@ -656,8 +696,19 @@ func (p *parser) update() (Statement, error) {
 	if err := p.expect("SET"); err != nil {
 		return nil, err
 	}
+	if up.Set, err = p.assigns(); err != nil {
+		return nil, err
+	}
+	up.Where, err = p.where()
+	return up, err
+}
+
+// assigns reads the list after SET: column = expr, ...
+func (p *parser) assigns() ([]Assign, error) {
+	var set []Assign
 	for {
 		a := Assign{At: p.tok.at}
+		var err error
 		if a.Column, err = p.name("a column name"); err != nil {
 			return nil, err
 		}
@@ -670,16 +721,14 @@ func (p *parser) update() (Statement, error) {
 		if a.Value, err = p.expr(); err != nil {
 			return nil, err
 		}
-		up.Set = append(up.Set, a)
+		set = append(set, a)
 		if !p.isOp(",") {
-			break
+			return set, nil
 		}
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
 	}
-	up.Where, err = p.where()
-	return up, err
 }
 
 func (p *parser) delete() (Statement, error) {
