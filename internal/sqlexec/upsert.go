@@ -1,6 +1,7 @@
 package sqlexec
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/dyadik-eu/datumujo/internal/sqlparse"
@@ -26,6 +27,25 @@ type conflictKey struct {
 type upsert struct {
 	keys    []conflictKey
 	nothing bool
+	sets    []target      // DO UPDATE SET, over the row there is and the row excluded
+	where   *Expr         // DO UPDATE ... WHERE; nil for none
+	whereSt sqlparse.Expr // the same, as written
+}
+
+// upsertScope resolves the names of DO UPDATE. A column of the table,
+// by its name or as t.c, is the row that is there. excluded.c is the row
+// that the INSERT would have written; it follows the row that is there.
+type upsertScope struct{ t *table.Table }
+
+func (s upsertScope) Column(tbl, name string) (int, table.Type, error) {
+	if tbl != "excluded" {
+		return tableScope{s.t}.Column(tbl, name)
+	}
+	i, typ, err := tableScope{s.t}.Column("", name)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: excluded.%s", errNoColumn, name)
+	}
+	return i + len(s.t.Columns), typ, nil
 }
 
 // newUpsert checks ON CONFLICT against the keys of t. A target must name
@@ -38,8 +58,8 @@ func newUpsert(t *table.Table, u *sqlparse.Upsert) (*upsert, error) {
 		}
 	}
 	up := &upsert{nothing: u.Nothing}
-	if !u.Nothing {
-		return nil, notYet(u.At, "ON CONFLICT DO UPDATE", 33)
+	if err := up.compile(t, u); err != nil {
+		return nil, err
 	}
 	if len(u.Target) == 0 {
 		up.keys = all
@@ -106,4 +126,67 @@ func (up *upsert) conflict(tx *table.Tx, t *table.Table, row []any) ([]any, erro
 		}
 	}
 	return nil, nil
+}
+
+// compile checks DO UPDATE SET and WHERE. A subquery has no place there:
+// it would run while the INSERT writes, and see the rows written before.
+func (up *upsert) compile(t *table.Table, u *sqlparse.Upsert) error {
+	scope := upsertScope{t}
+	seen := map[int]bool{}
+	for _, a := range u.Set {
+		col, _, err := tableScope{t}.Column("", a.Column)
+		if err != nil {
+			return errAt(a.At, "table %s: %v", t.Name, err)
+		}
+		if seen[col] {
+			return errAt(a.At, "column %s set twice", a.Column)
+		}
+		seen[col] = true
+		tg, err := newTarget(t, col, a.Value, scope, nil)
+		if err != nil {
+			return err
+		}
+		up.sets = append(up.sets, tg)
+	}
+	if u.Where == nil {
+		return nil
+	}
+	x, err := Compile(u.Where, scope)
+	if err != nil {
+		return err
+	}
+	if typ, ok := x.Type(); ok && typ != table.Bool {
+		return errAt(u.Where.Pos(), "WHERE needs BOOLEAN, and %s is %s", u.Where, TypeName(typ))
+	}
+	up.where, up.whereSt = x, u.Where
+	return nil
+}
+
+// update runs DO UPDATE for the row old that row conflicts with. It
+// reports whether it changed old: a WHERE that is not TRUE keeps it.
+func (up *upsert) update(tx *table.Tx, t *table.Table, cs []rowCheck, old, row, params []any, at sqlparse.At) (bool, error) {
+	both := append(append(make([]any, 0, 2*len(old)), old...), row...)
+	keep, err := keeps(up.where, up.whereSt, both, params)
+	if err != nil || !keep {
+		return false, err
+	}
+	n := append([]any(nil), old...)
+	for _, tg := range up.sets {
+		if n[tg.col], err = tg.value(t, both, params); err != nil {
+			return false, err
+		}
+	}
+	if err := checkNull(t, n, at); err != nil {
+		return false, err
+	}
+	if err := checkRow(t, cs, n, at); err != nil {
+		return false, err
+	}
+	// A new key moves the row, as in UPDATE.
+	if sameKey(t, old, n) {
+		err = tx.Update(t.Name, n)
+	} else if _, err = tx.Delete(t.Name, keyOf(t, old)...); err == nil {
+		err = tx.Insert(t.Name, n)
+	}
+	return true, engineErr(at, err)
 }

@@ -496,6 +496,15 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any, lim Limits) (Result,
 				return Result{}, engineErr(at, err)
 			}
 			if old != nil {
+				if !up.nothing {
+					changed, err := up.update(tx, t, cs, old, row, params, at)
+					if err != nil {
+						return Result{}, err
+					}
+					if changed {
+						res.RowsAffected++
+					}
+				}
 				continue
 			}
 		}

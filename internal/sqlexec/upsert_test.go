@@ -1,6 +1,7 @@
 package sqlexec
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dyadik-eu/datumujo/internal/store"
@@ -98,6 +99,86 @@ func TestDoNothingErrors(t *testing.T) {
 		{"INSERT INTO q VALUES (1, 1, 1) ON CONFLICT (z, y) DO NOTHING", 1, 32, "no PRIMARY KEY or UNIQUE", nil},
 	} {
 		failsAt(t, ss, c.src, c.line, c.col, c.msg, c.is)
+	}
+	if got := ss.dump("t"); got != "1 'x' 1 1\n2 'y' 2 2\n" {
+		t.Errorf("t after only errors:\n%s", got)
+	}
+}
+
+// TestDoUpdate checks ON CONFLICT DO UPDATE with excluded (L-17). Each
+// case starts from the rows (1, 'x', 1, 1) and (2, 'y', 2, 2). SQLite
+// 3.54.0 gives the same rows and counts for each.
+func TestDoUpdate(t *testing.T) {
+	for _, c := range []struct {
+		src  string
+		n    int64
+		want string
+	}{
+		{"INSERT INTO t VALUES (3, 'x', 9, 9) ON CONFLICT (a) DO UPDATE SET n = n + excluded.n", 1, "1 'x' 10 1\n2 'y' 2 2\n"},
+		// The second row conflicts with the row the first one changed.
+		{"INSERT INTO t (a, b) VALUES ('y', 5), ('y', 6) ON CONFLICT (a) DO UPDATE SET b = t.b + excluded.b", 2, "1 'x' 1 1\n2 'y' 2 13\n"},
+		{"INSERT INTO t VALUES (9, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET b = 100 WHERE excluded.n > 5", 0, "1 'x' 1 1\n2 'y' 2 2\n"},
+		{"INSERT INTO t VALUES (3, 'x', 9, 9) ON CONFLICT (a) DO UPDATE SET b = excluded.b WHERE b IS NULL", 0, "1 'x' 1 1\n2 'y' 2 2\n"},
+		// excluded.n of a column that the INSERT does not name is its
+		// default; one row is new and one changed.
+		{"INSERT INTO t (a) VALUES ('q'), ('x') ON CONFLICT (a) DO UPDATE SET n = excluded.n", 2, "1 'x' 0 1\n2 'y' 2 2\n3 'q' 0 NULL\n"},
+		// A new key moves the row.
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET id = 7", 1, "2 'y' 2 2\n7 'x' 1 1\n"},
+		// Without a target, the primary key comes first: the row has
+		// id 1, and a 'y' of the row with id 2. With the target a, the
+		// row with a 'y' changes.
+		{"INSERT INTO t VALUES (1, 'y', 9, 9) ON CONFLICT DO UPDATE SET b = 50", 1, "1 'x' 1 50\n2 'y' 2 2\n"},
+		{"INSERT INTO t VALUES (1, 'y', 9, 9) ON CONFLICT (a) DO UPDATE SET b = 50", 1, "1 'x' 1 1\n2 'y' 2 50\n"},
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT DO UPDATE SET b = 7", 1, "1 'x' 1 7\n2 'y' 2 2\n"},
+	} {
+		ss := upsertSession(t)
+		r, err := ss.exec(c.src)
+		if err != nil {
+			t.Errorf("%s: %v", c.src, err)
+			continue
+		}
+		if r.RowsAffected != c.n {
+			t.Errorf("%s: %d rows, want %d", c.src, r.RowsAffected, c.n)
+		}
+		if got := ss.dump("t"); got != c.want {
+			t.Errorf("%s: t is\n%s want\n%s", c.src, got, c.want)
+		}
+	}
+}
+
+// TestDoUpdateErrors: DO UPDATE that breaks a key, NOT NULL or a type
+// fails, as do names it does not know. A subquery has no place in it.
+func TestDoUpdateErrors(t *testing.T) {
+	ss := upsertSession(t)
+	for _, c := range []struct {
+		src       string
+		line, col int
+		msg       string
+		is        error
+	}{
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET a = 'y'", 1, 23, "", table.ErrUnique},
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET id = 2", 1, 23, "", table.ErrExists},
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET n = NULL", 1, 23, "NOT NULL", nil},
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET b = 'text'", 1, 71, "column b is INTEGER", nil},
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET b = excluded.nosuch", 1, 71, "no such column: excluded.nosuch", nil},
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET nosuch = 1", 1, 67, "no such column: nosuch", nil},
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET b = 1, b = 2", 1, 74, "column b set twice", nil},
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET b = 1 WHERE b", 1, 79, "WHERE needs BOOLEAN", nil},
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET b = (SELECT max(id) FROM t)", 1, 71, "a subquery cannot run here", nil},
+		{"INSERT INTO t VALUES (3, 'x', 0, 0) ON CONFLICT (a) DO UPDATE SET b = 1 WHERE EXISTS (SELECT 1)", 1, 79, "a subquery cannot run here", nil},
+	} {
+		failsAt(t, ss, c.src, c.line, c.col, c.msg, c.is)
+	}
+	// The type of WHERE fails before the run, so also with no conflict,
+	// where DO UPDATE never runs.
+	failsAt(t, ss, "INSERT INTO t VALUES (9, 'new', 0, 0) ON CONFLICT (a) DO UPDATE SET b = 1 WHERE b", 1, 81, "WHERE needs BOOLEAN", nil)
+	// The row of DO UPDATE passes the checks of the table, as in SQLite.
+	ss.must("CREATE TABLE c (id INTEGER PRIMARY KEY, a INTEGER CHECK (a > 0))")
+	ss.must("INSERT INTO c VALUES (1, 5)")
+	failsAt(t, ss, "INSERT INTO c VALUES (1, 5) ON CONFLICT DO UPDATE SET a = -1", 1, 23, "", ErrCheck)
+	// excluded is a name of DO UPDATE only, as in SQLite.
+	if _, err := ss.query("SELECT excluded.a FROM t"); err == nil || !strings.Contains(err.Error(), "no such column: excluded.a") {
+		t.Errorf("excluded outside DO UPDATE: %v", err)
 	}
 	if got := ss.dump("t"); got != "1 'x' 1 1\n2 'y' 2 2\n" {
 		t.Errorf("t after only errors:\n%s", got)
