@@ -51,9 +51,9 @@ type token struct {
 // keywords are reserved: a column or table with such a name needs double
 // quotes. Type names and function names are not keywords. Neither are
 // the words the parser knows by their place: ADD, BEGIN, CHECK, COLUMN,
-// COMMIT, CONFLICT, CURRENT_TIMESTAMP, DEFAULT, DO, EXISTS, IF, INDEX,
-// KEY, NOTHING, ROLLBACK and TRANSACTION. So a column can be called key,
-// index, default, check or do.
+// COMMIT, CONFLICT, CURRENT_TIMESTAMP, DEFAULT, DO, EXISTS, EXPLAIN, IF,
+// INDEX, KEY, NOTHING, PLAN, QUERY, ROLLBACK and TRANSACTION. So a
+// column can be called key, index, default, check, do or plan.
 var keywords = map[string]bool{}
 
 func init() {

@@ -275,6 +275,13 @@ func (s *Update) String() string {
 	return "UPDATE " + Name(s.Table) + " SET " + assigns(s.Set) + where(s.Where)
 }
 
+func (s *Explain) String() string {
+	if s.QueryPlan {
+		return "EXPLAIN QUERY PLAN " + s.Stmt.String()
+	}
+	return "EXPLAIN " + s.Stmt.String()
+}
+
 func (s *Delete) String() string { return "DELETE FROM " + Name(s.Table) + where(s.Where) }
 
 func (r TableRef) String() string {

@@ -248,6 +248,14 @@ type Upsert struct {
 	Where   Expr
 }
 
+// Explain is EXPLAIN [QUERY PLAN] before a SELECT, INSERT, UPDATE or
+// DELETE: the plan of the statement, which does not run.
+type Explain struct {
+	At
+	QueryPlan bool // written as EXPLAIN QUERY PLAN
+	Stmt      Statement
+}
+
 // Update is UPDATE ... SET ... [WHERE].
 type Update struct {
 	At
@@ -334,3 +342,4 @@ func (*Select) statement()      {}
 func (*Begin) statement()       {}
 func (*Commit) statement()      {}
 func (*Rollback) statement()    {}
+func (*Explain) statement()     {}
