@@ -378,3 +378,18 @@ func TestPool(t *testing.T) {
 		t.Errorf("%d rows, %v; want 200", n, err)
 	}
 }
+
+// TestExplain: database/sql runs EXPLAIN with Query, as a SELECT.
+func TestExplain(t *testing.T) {
+	db := open(t, filepath.Join(t.TempDir(), "forge.db"))
+	if _, err := db.Exec("CREATE TABLE repo (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	var plan string
+	if err := db.QueryRow("EXPLAIN SELECT name FROM repo WHERE id = ?", 1).Scan(&plan); err != nil || plan != "SEARCH repo USING PRIMARY KEY ((id = ?1))" {
+		t.Errorf("plan %q, %v", plan, err)
+	}
+	if _, err := db.Exec("EXPLAIN DELETE FROM repo"); err == nil || !strings.Contains(err.Error(), "EXPLAIN returns rows; run it with Query") {
+		t.Errorf("Exec of EXPLAIN: %v", err)
+	}
+}

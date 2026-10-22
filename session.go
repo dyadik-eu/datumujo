@@ -164,7 +164,7 @@ func (s *Session) Query(q string, params ...any) (*SQLRows, error) {
 }
 
 // Script runs the statements of the text in order, as Exec does, and
-// SELECT too. For a SELECT, it calls fn with its rows and closes them
+// SELECT and EXPLAIN too. For those, it calls fn with their rows and closes them
 // after; the rows are valid only in the call. An error, of a statement
 // or of fn, stops the script. Errors in the text name the line and
 // column in the whole text.
@@ -179,8 +179,8 @@ func (s *Session) Script(text string, fn func(*SQLRows) error, params ...any) (R
 	}
 	var total Result
 	for _, st := range sts {
-		if sel, ok := st.(*sqlparse.Select); ok {
-			if err := s.query(sel, ps, fn); err != nil {
+		if givesRows(st) {
+			if err := s.query(st, ps, fn); err != nil {
 				return total, err
 			}
 			continue
@@ -197,23 +197,23 @@ func (s *Session) Script(text string, fn func(*SQLRows) error, params ...any) (R
 	return total, nil
 }
 
-// query runs a parsed SELECT in the state of the session and hands its
-// rows to fn.
-func (s *Session) query(sel *sqlparse.Select, ps []any, fn func(*SQLRows) error) error {
+// query runs a parsed SELECT or EXPLAIN in the state of the session and
+// hands its rows to fn.
+func (s *Session) query(st sqlparse.Statement, ps []any, fn func(*SQLRows) error) error {
 	var rows *sqlexec.Rows
 	var err error
 	switch {
 	case s.tx != nil:
-		rows, err = runSelect(s.tx.Tx, s.db.limits(), sel, ps)
+		rows, err = runQuery(s.tx.Tx, s.db.limits(), st, ps)
 	case s.view != nil:
-		rows, err = runSelect(s.view.View, s.db.limits(), sel, ps)
+		rows, err = runQuery(s.view.View, s.db.limits(), st, ps)
 	default:
 		var v *View
 		if v, err = s.db.View(); err != nil {
 			return err
 		}
 		defer v.Close()
-		rows, err = runSelect(v.View, s.db.limits(), sel, ps)
+		rows, err = runQuery(v.View, s.db.limits(), st, ps)
 	}
 	if err != nil {
 		return err

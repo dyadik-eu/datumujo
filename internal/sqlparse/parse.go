@@ -192,6 +192,8 @@ func (p *parser) names(what string) ([]string, error) {
 func (p *parser) statement() (Statement, error) {
 	at := p.tok.at
 	switch {
+	case p.isWord("explain"):
+		return p.explain()
 	case p.isKw("SELECT"):
 		return p.selectStmt()
 	case p.isKw("INSERT"):
@@ -223,6 +225,30 @@ func (p *parser) statement() (Statement, error) {
 		return &Rollback{at}, nil
 	}
 	return nil, p.unexpected("a statement")
+}
+
+// explain reads EXPLAIN [QUERY PLAN] and the statement after it, which
+// must be one that reads or writes rows.
+func (p *parser) explain() (Statement, error) {
+	ex := &Explain{At: p.tok.at}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+	if ok, err := p.acceptWord("query"); ok || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectWord("plan"); err != nil {
+			return nil, err
+		}
+		ex.QueryPlan = true
+	}
+	if !p.isKw("SELECT") && !p.isKw("INSERT") && !p.isKw("UPDATE") && !p.isKw("DELETE") {
+		return nil, p.unexpected("SELECT, INSERT, UPDATE or DELETE")
+	}
+	var err error
+	ex.Stmt, err = p.statement()
+	return ex, err
 }
 
 // ifExists reads IF EXISTS, or IF NOT EXISTS with not set.

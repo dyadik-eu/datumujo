@@ -36,6 +36,10 @@ the API and the file format can change in any release.
 - `INSERT ... ON CONFLICT [(columns)] DO NOTHING` and
   `DO UPDATE SET ... [WHERE ...]` with `excluded`. See "On conflict" in
   [docs/sql.md](docs/sql.md).
+- `EXPLAIN [QUERY PLAN]` before a SELECT, INSERT, UPDATE or DELETE gives
+  its plan as rows of one TEXT column `plan`, and does not run it. Run
+  it with `Query`, `Session.Script`, `database/sql` or the shell. See
+  "Explain" in [docs/sql.md](docs/sql.md).
 - `datumujo check` and `Stats.FormatVersion` report the format version.
 
 ### Changed

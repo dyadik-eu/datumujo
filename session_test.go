@@ -118,3 +118,23 @@ func TestScript(t *testing.T) {
 		t.Errorf("rows %v; the INSERT after the error of fn ran", seen)
 	}
 }
+
+// TestScriptExplain: Script hands the rows of EXPLAIN to fn like those of
+// a SELECT. In a transaction, the plan sees its new index.
+func TestScriptExplain(t *testing.T) {
+	db := open(t, filepath.Join(t.TempDir(), "db"), datumujo.Options{})
+	s := db.Session()
+	defer s.Close()
+	var seen []string
+	collect := func(rows *datumujo.SQLRows) error {
+		for rows.Next() {
+			seen = append(seen, fmt.Sprint(rows.Row()...))
+		}
+		return nil
+	}
+	_, err := s.Script(`CREATE TABLE t (n INTEGER, m INTEGER); BEGIN; CREATE INDEX t_n ON t (n);
+		EXPLAIN SELECT m FROM t WHERE n = 1; ROLLBACK; EXPLAIN QUERY PLAN SELECT m FROM t WHERE n = ?`, collect, 1)
+	if want := "[SEARCH t USING INDEX t_n ((n = 1)) SCAN t]"; err != nil || fmt.Sprint(seen) != want {
+		t.Errorf("script: %v, %v, want %s", err, seen, want)
+	}
+}

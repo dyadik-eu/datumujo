@@ -36,6 +36,8 @@ func Exec(tx *table.Tx, st sqlparse.Statement, params []any, lim Limits) (Result
 	switch st.(type) {
 	case *sqlparse.Select:
 		return Result{}, wrap(st.Pos(), ErrStatement, "SELECT returns rows; run it with Query")
+	case *sqlparse.Explain:
+		return Result{}, wrap(st.Pos(), ErrStatement, "EXPLAIN returns rows; run it with Query")
 	case *sqlparse.Begin, *sqlparse.Commit, *sqlparse.Rollback:
 		return Result{}, wrap(st.Pos(), ErrStatement, "%s: begin, commit and roll back a transaction with its methods", st)
 	}
@@ -136,7 +138,11 @@ func (s tableScope) Column(tbl, name string) (int, table.Type, error) {
 }
 
 func findTable(tx *table.Tx, at sqlparse.At, name string) (*table.Table, error) {
-	t, ok := tx.Schema().Table(name)
+	return schemaTable(tx.Schema(), at, name)
+}
+
+func schemaTable(sc *table.Schema, at sqlparse.At, name string) (*table.Table, error) {
+	t, ok := sc.Table(name)
 	if !ok {
 		return nil, wrap(at, table.ErrNoTable, "no such table: %s", name)
 	}
@@ -401,10 +407,21 @@ func nextKey(tx *table.Tx, t *table.Table, col int, at sqlparse.At) (int64, erro
 	return last + 1, nil
 }
 
-func insert(tx *table.Tx, s *sqlparse.Insert, params []any, lim Limits) (Result, error) {
-	t, err := findTable(tx, s.At, s.Table)
+// insertPlan is an INSERT compiled, for its run or for EXPLAIN.
+type insertPlan struct {
+	t    *table.Table
+	rows [][]target
+	defs []any
+	cs   []rowCheck
+	up   *upsert
+	subs *subqueries
+}
+
+// prepareInsert compiles an INSERT. It reads and writes no row.
+func prepareInsert(sc *table.Schema, s *sqlparse.Insert, lim Limits) (*insertPlan, error) {
+	t, err := schemaTable(sc, s.At, s.Table)
 	if err != nil {
-		return Result{}, err
+		return nil, err
 	}
 	cols := visible(t)
 	var seen map[int]bool
@@ -414,25 +431,25 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any, lim Limits) (Result,
 		for _, name := range s.Columns {
 			i, _, err := tableScope{t}.Column("", name)
 			if err != nil {
-				return Result{}, errAt(s.At, "table %s: %v", t.Name, err)
+				return nil, errAt(s.At, "table %s: %v", t.Name, err)
 			}
 			if seen[i] {
-				return Result{}, errAt(s.At, "column %s twice", name)
+				return nil, errAt(s.At, "column %s twice", name)
 			}
 			seen[i] = true
 			cols = append(cols, i)
 		}
 	}
-	subs := newSubqueries(tx.Schema(), lim, nil)
+	subs := newSubqueries(sc, lim, nil)
 	rows := make([][]target, len(s.Rows))
 	for i, r := range s.Rows {
 		if len(r) != len(cols) {
-			return Result{}, errAt(r[0].Pos(), "%d values for %d columns", len(r), len(cols))
+			return nil, errAt(r[0].Pos(), "%d values for %d columns", len(r), len(cols))
 		}
 		for j, e := range r {
 			tg, err := newTarget(t, cols[j], e, nil, subs)
 			if err != nil {
-				return Result{}, err
+				return nil, err
 			}
 			rows[i] = append(rows[i], tg)
 		}
@@ -447,18 +464,27 @@ func insert(tx *table.Tx, s *sqlparse.Insert, params []any, lim Limits) (Result,
 	}
 	defs, err := defaults(t, seen, s.At)
 	if err != nil {
-		return Result{}, err
+		return nil, err
 	}
 	cs, err := checksOf(t, t.Checks)
 	if err != nil {
-		return Result{}, err
+		return nil, err
 	}
 	var up *upsert
 	if s.Upsert != nil {
 		if up, err = newUpsert(t, s.Upsert); err != nil {
-			return Result{}, err
+			return nil, err
 		}
 	}
+	return &insertPlan{t: t, rows: rows, defs: defs, cs: cs, up: up, subs: subs}, nil
+}
+
+func insert(tx *table.Tx, s *sqlparse.Insert, params []any, lim Limits) (Result, error) {
+	p, err := prepareInsert(tx.Schema(), s, lim)
+	if err != nil {
+		return Result{}, err
+	}
+	t, rows, defs, cs, up, subs := p.t, p.rows, p.defs, p.cs, p.up, p.subs
 	// Every value comes first, then every write: a subquery reads the
 	// table as it was before the statement, as in SQLite.
 	subs.bind(tx, params)
@@ -556,11 +582,7 @@ func keeps(w *Expr, e sqlparse.Expr, row, params []any) (bool, error) {
 // scan undefined. The plan narrows the rows it reads, and the bound of
 // memory counts the rows it keeps.
 func matching(tx *table.Tx, t *table.Table, w *Expr, e sqlparse.Expr, at sqlparse.At, params []any, lim Limits, scanned *int64) ([][]any, error) {
-	var a *access
-	if !lim.NoIndex {
-		a = choose(t, constraints(e, tableScope{t}))
-	}
-	read, err := readRows(tx, t, a, nil, params, at, scanned)
+	read, err := readRows(tx, t, writeAccess(t, e, lim), nil, params, at, scanned)
 	if err != nil {
 		return nil, err
 	}
@@ -587,6 +609,15 @@ func matching(tx *table.Tx, t *table.Table, w *Expr, e sqlparse.Expr, at sqlpars
 	}
 }
 
+// writeAccess chooses how UPDATE and DELETE read the rows of t that may
+// match e. nil reads every row.
+func writeAccess(t *table.Table, e sqlparse.Expr, lim Limits) *access {
+	if lim.NoIndex {
+		return nil
+	}
+	return choose(t, constraints(e, tableScope{t}))
+}
+
 func keyOf(t *table.Table, row []any) []any {
 	k := make([]any, len(t.Key))
 	for i, c := range t.Key {
@@ -605,38 +636,57 @@ func sameKey(t *table.Table, a, b []any) bool {
 	return true
 }
 
-func update(tx *table.Tx, s *sqlparse.Update, params []any, lim Limits) (Result, error) {
-	t, err := findTable(tx, s.At, s.Table)
+// updatePlan is an UPDATE compiled, for its run or for EXPLAIN.
+type updatePlan struct {
+	t    *table.Table
+	sets []target
+	w    *Expr
+	cs   []rowCheck
+	subs *subqueries
+}
+
+// prepareUpdate compiles an UPDATE. It reads and writes no row.
+func prepareUpdate(sc *table.Schema, s *sqlparse.Update, lim Limits) (*updatePlan, error) {
+	t, err := schemaTable(sc, s.At, s.Table)
 	if err != nil {
-		return Result{}, err
+		return nil, err
 	}
 	scope := tableScope{t}
-	subs := newSubqueries(tx.Schema(), lim, nil)
+	subs := newSubqueries(sc, lim, nil)
 	var sets []target
 	seen := map[int]bool{}
 	for _, a := range s.Set {
 		col, _, err := scope.Column("", a.Column)
 		if err != nil {
-			return Result{}, errAt(a.At, "table %s: %v", t.Name, err)
+			return nil, errAt(a.At, "table %s: %v", t.Name, err)
 		}
 		if seen[col] {
-			return Result{}, errAt(a.At, "column %s set twice", a.Column)
+			return nil, errAt(a.At, "column %s set twice", a.Column)
 		}
 		seen[col] = true
 		tg, err := newTarget(t, col, a.Value, scope, subs)
 		if err != nil {
-			return Result{}, err
+			return nil, err
 		}
 		sets = append(sets, tg)
 	}
 	w, err := where(s.Where, t, subs)
 	if err != nil {
-		return Result{}, err
+		return nil, err
 	}
 	cs, err := checksOf(t, t.Checks)
 	if err != nil {
+		return nil, err
+	}
+	return &updatePlan{t: t, sets: sets, w: w, cs: cs, subs: subs}, nil
+}
+
+func update(tx *table.Tx, s *sqlparse.Update, params []any, lim Limits) (Result, error) {
+	p, err := prepareUpdate(tx.Schema(), s, lim)
+	if err != nil {
 		return Result{}, err
 	}
+	t, sets, w, cs, subs := p.t, p.sets, p.w, p.cs, p.subs
 	var scanned int64
 	subs.bind(tx, params)
 	old, err := matching(tx, t, w, s.Where, s.At, params, lim, &scanned)
@@ -673,13 +723,23 @@ func update(tx *table.Tx, s *sqlparse.Update, params []any, lim Limits) (Result,
 	return Result{RowsAffected: int64(len(old)), scanned: scanned}, nil
 }
 
-func deleteRows(tx *table.Tx, s *sqlparse.Delete, params []any, lim Limits) (Result, error) {
-	t, err := findTable(tx, s.At, s.Table)
+// prepareDelete compiles a DELETE: its table, WHERE and subqueries. It
+// reads and writes no row.
+func prepareDelete(sc *table.Schema, s *sqlparse.Delete, lim Limits) (*table.Table, *Expr, *subqueries, error) {
+	t, err := schemaTable(sc, s.At, s.Table)
 	if err != nil {
-		return Result{}, err
+		return nil, nil, nil, err
 	}
-	subs := newSubqueries(tx.Schema(), lim, nil)
+	subs := newSubqueries(sc, lim, nil)
 	w, err := where(s.Where, t, subs)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return t, w, subs, nil
+}
+
+func deleteRows(tx *table.Tx, s *sqlparse.Delete, params []any, lim Limits) (Result, error) {
+	t, w, subs, err := prepareDelete(tx.Schema(), s, lim)
 	if err != nil {
 		return Result{}, err
 	}

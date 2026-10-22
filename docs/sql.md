@@ -2,7 +2,7 @@
 
 This is the SQL of stage 2 and of the parts of stage 3 that are done.
 It says what the SQL has, how its values behave, and its limits. The requirements are
-L-1 to L-12, L-13 for DEFAULT, L-14 for CHECK, L-15 for UNIQUE, L-16 for subqueries and L-17 for ON CONFLICT, in [requirements.md](requirements.md). Each difference to SQLite is in the
+L-1 to L-12, L-13 for DEFAULT, L-14 for CHECK, L-15 for UNIQUE, L-16 for subqueries, L-17 for ON CONFLICT and L-18 for EXPLAIN, in [requirements.md](requirements.md). Each difference to SQLite is in the
 oracle table there. How the parts work is in [design.md](design.md).
 
 ## Where SQL runs
@@ -12,7 +12,7 @@ oracle table there. How the parts work is in [design.md](design.md).
 | `DB.Exec`, `DB.Query` | one call, one transaction |
 | `Tx.Exec`, `Tx.Query`, `View.Query` | inside a transaction or a snapshot of the Go API |
 | `DB.Session` | SQL text with BEGIN, COMMIT and ROLLBACK, as a client connection |
-| `Session.Script` | a text of several statements, SELECT included |
+| `Session.Script` | a text of several statements, SELECT and EXPLAIN included |
 | the package `sqldriver` | `database/sql`, as the driver "datumujo" |
 | `datumujo sql FILE [SQL]` | the shell |
 
@@ -39,6 +39,7 @@ SELECT [DISTINCT] e [[AS] a], ... | * | t.*
 BEGIN [TRANSACTION]
 COMMIT [TRANSACTION]
 ROLLBACK [TRANSACTION]
+EXPLAIN [QUERY PLAN] SELECT ... | INSERT ... | UPDATE ... | DELETE ...
 ```
 
 A statement is atomic. When it fails, it changes nothing, and the
@@ -226,6 +227,40 @@ rows holds the rows written and the rows that DO UPDATE changed.
 
 DO UPDATE takes no subquery: it would run while the INSERT writes, and
 see the rows written before.
+
+## Explain
+
+EXPLAIN before a SELECT, INSERT, UPDATE or DELETE gives the plan of the
+statement and does not run it. It reads no row and writes none. Run it
+with Query, as a SELECT; Exec refuses it. `EXPLAIN QUERY PLAN` gives the
+same rows.
+
+The plan has one TEXT column, `plan`. The first row is the statement.
+Each subquery has a row after it with its number, its text and its
+plan. CORRELATED marks a subquery that reads a column of a query around
+it. A subquery
+inside subquery 1 is 1.1.
+
+```sql
+CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER)
+CREATE TABLE u (k INTEGER, v INTEGER)
+CREATE INDEX u_k ON u (k)
+EXPLAIN SELECT id, (SELECT max(v) FROM u WHERE u.k = t.id) FROM t WHERE id = 2
+```
+
+| plan |
+|---|
+| `SEARCH t USING PRIMARY KEY ((id = 2))` |
+| `SUBQUERY 1 (SELECT max(v) FROM u WHERE (u.k = t.id)), CORRELATED: SEARCH u USING INDEX u_k ((u.k = t.id)); GROUP` |
+
+The row of an INSERT gives the number of rows, and ON CONFLICT the keys
+that it looks up: `INSERT INTO t: 2 ROWS`, then `ON CONFLICT: LOOK UP
+PRIMARY KEY; DO UPDATE`. UPDATE and DELETE give how they find their
+rows: `UPDATE u: SEARCH u USING INDEX u_k ((k = 1))`.
+
+EXPLAIN compiles the statement as a run would. A statement that fails
+to compile fails under EXPLAIN too, at the same place. In a transaction,
+the plan sees the tables and indexes of the transaction.
 
 ## Types
 

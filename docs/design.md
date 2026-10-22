@@ -543,6 +543,31 @@ table layer checks. Without a target, DO UPDATE must take the primary
 key first. With a target, a conflict on another key must fail. Both
 need the lookup in the order of the keys.
 
+## Explain
+
+EXPLAIN (L-18) compiles its statement with the functions that a run
+uses: `prepare` for a SELECT, `prepareInsert`, `prepareUpdate` and
+`prepareDelete` for the writes. UPDATE and DELETE find their rows with
+`writeAccess`, which the run calls too. So the plan is the plan of the
+run, and a statement that fails to compile fails under EXPLAIN at the
+same place. Nothing runs: no row is read, no subquery runs, and nothing
+is written.
+
+`sqlexec.Explain` gives a `Rows` of one TEXT column. `Query` and
+`Session` take it as they take the rows of a SELECT. The driver and the
+shell call those two, so none of them has code of its own for EXPLAIN. Each runs it on the schema
+it sees, so in a transaction the plan sees an index that the transaction
+made.
+
+### Rejected: the rows of SQLite
+
+SQLite gives bytecode for EXPLAIN, and a tree in four columns for
+EXPLAIN QUERY PLAN. datumujo has no bytecode. A tree with id and parent
+would give the same lines with more columns, and the lines of two
+engines do not compare anyway. One column of text prints as it is in
+the shell. So EXPLAIN and EXPLAIN QUERY PLAN give the same rows here,
+and the oracle table names both forms.
+
 ## Indexes
 
 An index is a tree of its own. The key of an entry is the index columns of
