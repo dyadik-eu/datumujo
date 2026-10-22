@@ -453,3 +453,63 @@ func TestQuery(t *testing.T) {
 		t.Errorf("unknown column: %v", err)
 	}
 }
+
+// TestExplainQuery: Query runs EXPLAIN (L-18) on the schema it sees. A Tx
+// sees its own new index, the DB does not. Exec refuses EXPLAIN.
+func TestExplainQuery(t *testing.T) {
+	db := open(t, filepath.Join(t.TempDir(), "db"), datumujo.Options{})
+	if _, err := db.Exec("CREATE TABLE repo (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	plan := func(rows *datumujo.SQLRows, err error) string {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		if cols := rows.Columns(); len(cols) != 1 || cols[0].Name != "plan" || cols[0].Type != datumujo.String {
+			t.Errorf("columns %+v", cols)
+		}
+		var out []string
+		for rows.Next() {
+			out = append(out, rows.Row()[0].(string))
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(out, "|")
+	}
+	if got := plan(db.Query("EXPLAIN SELECT id FROM repo WHERE name = ?", "a")); got != "SCAN repo" {
+		t.Errorf("DB: %q", got)
+	}
+	if err := db.Update(func(tx *datumujo.Tx) error {
+		if _, err := tx.Exec("CREATE INDEX by_name ON repo (name)"); err != nil {
+			return err
+		}
+		if got := plan(tx.Query("EXPLAIN QUERY PLAN DELETE FROM repo WHERE name = 'a'")); got != "DELETE FROM repo: SEARCH repo USING INDEX by_name ((name = 'a'))" {
+			t.Errorf("Tx: %q", got)
+		}
+		return errors.New("roll back")
+	}); err == nil {
+		t.Fatal("the Tx committed")
+	}
+	if err := db.Read(func(v *datumujo.View) error {
+		if got := plan(v.Query("EXPLAIN UPDATE repo SET name = 'b' WHERE name = 'a'")); got != "UPDATE repo: SCAN repo" {
+			t.Errorf("View after the rollback: %q", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// EXPLAIN writes nothing.
+	plan(db.Query("EXPLAIN INSERT INTO repo VALUES (1, 'a')"))
+	if got := plan(db.Query("SELECT 'rows: ' || CAST(count(*) AS TEXT) AS plan FROM repo")); got != "rows: 0" {
+		t.Errorf("after EXPLAIN INSERT: %v", got)
+	}
+	if _, err := db.Exec("EXPLAIN SELECT 1"); err == nil || !strings.Contains(err.Error(), "EXPLAIN returns rows; run it with Query") {
+		t.Errorf("Exec of EXPLAIN: %v", err)
+	}
+	if _, err := db.Query("CREATE TABLE x (a INTEGER)"); err == nil || !strings.Contains(err.Error(), "returns no rows; run it with Exec") {
+		t.Errorf("Query of CREATE: %v", err)
+	}
+}

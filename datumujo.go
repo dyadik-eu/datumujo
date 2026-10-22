@@ -321,33 +321,46 @@ func (r *SQLRows) Close() {
 	}
 }
 
-// query parses one SELECT and runs it on src.
+// query parses one SELECT or EXPLAIN and runs it on src.
 func query(src sqlexec.Source, lim sqlexec.Limits, q string, params []any) (*sqlexec.Rows, error) {
 	st, err := sqlparse.Parse(q)
 	if err != nil {
 		return nil, err
 	}
-	sel, ok := st.(*sqlparse.Select)
-	if !ok {
+	if !givesRows(st) {
 		return nil, &SQLError{At: st.Pos(), Msg: st.String() + " returns no rows; run it with Exec", Err: sqlexec.ErrStatement}
 	}
 	ps, err := sqlexec.Params(params)
 	if err != nil {
 		return nil, err
 	}
-	return runSelect(src, lim, sel, ps)
+	return runQuery(src, lim, st, ps)
 }
 
-// runSelect runs a parsed SELECT on src.
-func runSelect(src sqlexec.Source, lim sqlexec.Limits, sel *sqlparse.Select, ps []any) (*sqlexec.Rows, error) {
-	pq, err := sqlexec.Prepare(src.Schema(), sel, lim)
+// givesRows reports a statement that Query runs: SELECT, and EXPLAIN,
+// which gives the plan of a statement as rows.
+func givesRows(st sqlparse.Statement) bool {
+	switch st.(type) {
+	case *sqlparse.Select, *sqlparse.Explain:
+		return true
+	}
+	return false
+}
+
+// runQuery runs a parsed SELECT on src, or gives the plan of an EXPLAIN.
+// EXPLAIN reads no row of src, only its schema.
+func runQuery(src sqlexec.Source, lim sqlexec.Limits, st sqlparse.Statement, ps []any) (*sqlexec.Rows, error) {
+	if ex, ok := st.(*sqlparse.Explain); ok {
+		return sqlexec.Explain(src.Schema(), ex, lim)
+	}
+	pq, err := sqlexec.Prepare(src.Schema(), st.(*sqlparse.Select), lim)
 	if err != nil {
 		return nil, err
 	}
 	return pq.Run(src, ps)
 }
 
-// Query runs one SELECT on the view.
+// Query runs one SELECT or EXPLAIN on the view.
 func (v *View) Query(q string, params ...any) (*SQLRows, error) {
 	rows, err := query(v.View, v.lim, q, params)
 	if err != nil {
@@ -356,7 +369,7 @@ func (v *View) Query(q string, params ...any) (*SQLRows, error) {
 	return &SQLRows{Rows: rows}, nil
 }
 
-// Query runs one SELECT in the transaction. It sees the changes of the
+// Query runs one SELECT or EXPLAIN in the transaction. It sees the changes of the
 // transaction. A write while the rows are open leaves them undefined.
 func (tx *Tx) Query(q string, params ...any) (*SQLRows, error) {
 	rows, err := query(tx.Tx, tx.db.limits(), q, params)
@@ -366,7 +379,7 @@ func (tx *Tx) Query(q string, params ...any) (*SQLRows, error) {
 	return &SQLRows{Rows: rows}, nil
 }
 
-// Query runs one SELECT on the last commit. The rows hold a view of that
+// Query runs one SELECT or EXPLAIN on the last commit. The rows hold a view of that
 // commit until Close; while it is open, no checkpoint runs.
 func (db *DB) Query(q string, params ...any) (*SQLRows, error) {
 	v, err := db.View()

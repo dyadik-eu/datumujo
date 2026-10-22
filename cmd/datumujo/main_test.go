@@ -193,6 +193,10 @@ func TestSQL(t *testing.T) {
 	if code, _, stderr := sql("SELECT 10 / (2 - id) FROM issue ORDER BY id"); code != 1 || !strings.Contains(stderr, "division by zero") {
 		t.Errorf("error in a row: exit %d, %q", code, stderr)
 	}
+	// EXPLAIN prints the plan, as a column plan.
+	if code, stdout, _ := sql("EXPLAIN SELECT title FROM issue WHERE id = 1"); code != 0 || stdout != "plan\nSEARCH issue USING PRIMARY KEY ((id = 1))\n" {
+		t.Errorf("EXPLAIN: exit %d, %q", code, stdout)
+	}
 	if code, _, stderr := sql("SELEC 1"); code != 1 || !strings.Contains(stderr, "line 1, column 1") {
 		t.Errorf("syntax error: exit %d, %q", code, stderr)
 	}

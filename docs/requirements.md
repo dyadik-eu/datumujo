@@ -165,6 +165,9 @@ Where SQL differs on purpose (L-3), the test states the difference:
 | ON that reads a table joined after it | taken | error: no such column; ON reads the tables up to its own |
 | a subquery in DO UPDATE of ON CONFLICT | taken; it sees the rows that the INSERT wrote before | error: a subquery cannot run here |
 | a column twice in SET, of UPDATE or DO UPDATE | the last value | error: column set twice |
+| `EXPLAIN SELECT ...` | the bytecode of the statement, one row for each instruction | the plan, the same rows as EXPLAIN QUERY PLAN (L-18); not in oracle tests |
+| the rows of `EXPLAIN QUERY PLAN` | columns id, parent, notused, detail, as a tree | one TEXT column plan, a row for the statement and one for each subquery |
+| `EXPLAIN QUERY PLAN CREATE TABLE ...`, and other statements than SELECT, INSERT, UPDATE, DELETE | no rows | syntax error |
 | an error inside a CHECK, such as `10 / 0` | NULL, so the row passes | error of the statement |
 | `CONSTRAINT name CHECK (...)` | a named check | not in the SQL |
 | `UNIQUE (a, a)` | taken | error when the table is made |
