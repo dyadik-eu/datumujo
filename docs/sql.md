@@ -1,6 +1,6 @@
 # The SQL of datumujo
 
-This is the SQL of stage 2 and of the parts of stage 3 that are done.
+This is the SQL of stages 2 and 3.
 It says what the SQL has, how its values behave, and its limits. The requirements are
 L-1 to L-12, L-13 for DEFAULT, L-14 for CHECK, L-15 for UNIQUE, L-16 for subqueries, L-17 for ON CONFLICT and L-18 for EXPLAIN, in [requirements.md](requirements.md). Each difference to SQLite is in the
 oracle table there. How the parts work is in [design.md](design.md).
@@ -378,7 +378,7 @@ mark. Each byte 0 in it takes 2 bytes. An INTEGER and a REAL take 8
 bytes, a TIMESTAMP 12, a BOOLEAN 1. A column that allows NULL takes one
 byte more in an index.
 
-## Not in stage 2
+## Not in the SQL
 
 - common table expressions, views, triggers, foreign keys
 - window functions, UNION, NATURAL and USING joins

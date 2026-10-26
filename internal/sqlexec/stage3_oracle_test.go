@@ -19,9 +19,11 @@ import (
 // and t4, and subqueries read across all four tables.
 //
 // The script leaves out the differences in the oracle table. A subquery
-// as a value is an aggregate or reads one key. A subquery in UPDATE or
-// DELETE reads no row of the table that the statement writes. UPDATE
-// sets no column of a key or a UNIQUE to an expression.
+// as a value is an aggregate or reads one key. A subquery in UPDATE reads
+// no row of the table that the statement writes. UPDATE sets no column
+// of a key or a UNIQUE to an expression. A subquery in DELETE can read
+// the table that the statement deletes from: both see the table as it
+// was before the statement.
 //
 // Each statement must fail in both or in neither. Each query must give
 // the rows of SQLite at its place in the script, and all tables must hold
@@ -176,7 +178,11 @@ func (g stage3) write() (src, kind string) {
 		if w.r.Intn(2) == 0 {
 			return "DELETE FROM t4 WHERE " + g.t4Cond(), "delete"
 		}
-		return "DELETE FROM t4 WHERE id = " + strconv.Itoa(1+w.r.Intn(20)), "delete"
+		return "DELETE FROM t4 WHERE " + w.one(
+			"id = "+strconv.Itoa(1+w.r.Intn(20)),
+			"n < (SELECT max(n) FROM t4) - 2",
+			"EXISTS (SELECT 1 FROM t4 AS o WHERE o.m = t4.m AND o.id < t4.id)",
+			"id NOT IN (SELECT max(id) FROM t4 GROUP BY s IS NULL)"), "delete"
 	}
 	return "INSERT INTO t4 (id, s, n, m) VALUES (" + g.id() + ", " + g.text() + ", " + g.num() + ", " + w.one(g.num(), "12") + ")", "check"
 }
