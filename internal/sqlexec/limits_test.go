@@ -79,3 +79,100 @@ func TestLimits(t *testing.T) {
 		t.Errorf("a value of 1 MiB in a transaction of 1 MiB: %v", err)
 	}
 }
+
+// TestLimitsOfStage3 hits the limits of the forms of stage 3 that
+// docs/sql.md names: the last value that fits, and the first that does
+// not.
+func TestLimitsOfStage3(t *testing.T) {
+	ss := newSession(t, store.Options{})
+	ss.must("CREATE TABLE t (a INTEGER)")
+	ss.must("INSERT INTO t VALUES (1)")
+
+	// Subqueries inside each other: 199. Each is a level of the 200
+	// levels of nesting, and the SELECT around them is one more. A
+	// correlated subquery reads the row of t through all 199.
+	nest := func(n int, inner, outer string) string {
+		return "SELECT " + strings.Repeat("(SELECT ", n) + inner + strings.Repeat(")", n) + outer
+	}
+	for _, src := range []string{nest(199, "a FROM t", ""), nest(199, "t.a", " FROM t")} {
+		if got, err := ss.query(src); err != nil || got != "1\n" {
+			t.Errorf("199 subqueries inside each other: %q %v", got, err)
+		}
+	}
+	if _, err := ss.query(nest(200, "a FROM t", "")); err == nil || !strings.Contains(err.Error(), "nested more than 200 levels") {
+		t.Errorf("200 subqueries inside each other: %v", err)
+	}
+
+	// Each UNIQUE is an index, so a table takes 64 of them.
+	unique := func(n int) string {
+		var cs []string
+		for i := 0; i < n; i++ {
+			cs = append(cs, fmt.Sprintf("c%d INTEGER UNIQUE", i))
+		}
+		return strings.Join(cs, ", ")
+	}
+	ss.must("CREATE TABLE u64 (" + unique(64) + ")")
+	if _, err := ss.exec("CREATE TABLE u65 (" + unique(65) + ")"); !errors.Is(err, table.ErrSchema) {
+		t.Errorf("65 UNIQUE: %v", err)
+	}
+	if _, err := ss.exec("CREATE INDEX one_more ON u64 (c0)"); !errors.Is(err, table.ErrSchema) {
+		t.Errorf("an index after 64 UNIQUE: %v", err)
+	}
+
+	// The name of the index of a UNIQUE is the table name and _unique_1,
+	// 9 bytes. So the table name holds 246 of the 255 bytes.
+	ss.must(fmt.Sprintf(`CREATE TABLE "%s" (x INTEGER UNIQUE)`, strings.Repeat("u", 246)))
+	if _, err := ss.exec(fmt.Sprintf(`CREATE TABLE "%s" (x INTEGER UNIQUE)`, strings.Repeat("v", 247))); err == nil || !strings.Contains(err.Error(), "longer than 255 bytes") {
+		t.Errorf("a table name of 247 bytes with a UNIQUE: %v", err)
+	}
+
+	// A DEFAULT and a CHECK have no limit of their own. The schema is one
+	// value that holds their text, and each change of the schema writes
+	// it again. In a transaction of 1 MiB, a table with a DEFAULT of
+	// 1037305 bytes can be made. But from 518613 bytes on, the next
+	// change of the schema fails, as does a CHECK of that size.
+	schema := func(def, check int, next bool) error {
+		t.Helper()
+		small := newSession(t, store.Options{MaxTxBytes: 1 << 20})
+		src := "CREATE TABLE d (a TEXT DEFAULT '" + strings.Repeat("d", def) + "')"
+		if check > 0 {
+			src = "CREATE TABLE d (a TEXT CHECK (a <> '" + strings.Repeat("c", check) + "'))"
+		}
+		if _, err := small.exec(src); err != nil || !next {
+			return err
+		}
+		small.commit()
+		_, err := small.exec("CREATE TABLE x (a INTEGER)")
+		return err
+	}
+	for _, c := range []struct {
+		what       string
+		def, check int
+		next, ok   bool
+	}{
+		{"a DEFAULT of 1037305 bytes", 1037305, 0, false, true},
+		{"a DEFAULT of 1037306 bytes", 1037306, 0, false, false},
+		{"a change after a DEFAULT of 518612 bytes", 518612, 0, true, true},
+		{"a change after a DEFAULT of 518613 bytes", 518613, 0, true, false},
+		{"a change after a CHECK of 518613 bytes", 0, 518613, true, false},
+	} {
+		if err := schema(c.def, c.check, c.next); (err == nil) != c.ok || err != nil && !errors.Is(err, store.ErrTxTooLarge) {
+			t.Errorf("%s in a transaction of 1 MiB: %v", c.what, err)
+		}
+	}
+
+	// The values of IN (SELECT ...) count toward the memory of the
+	// statement, also in a correlated subquery. 6 values of 3000 bytes
+	// fit in 20000 bytes, 8 do not.
+	ss.must("CREATE TABLE s (k INTEGER, v TEXT)")
+	for i := 0; i < 8; i++ {
+		ss.must("INSERT INTO s VALUES (1, ?)", strings.Repeat("x", 3000))
+	}
+	ss.lim = Limits{MaxMemory: 20000}
+	if _, err := ss.query("SELECT 'x' IN (SELECT v FROM s WHERE s.k = t.a LIMIT 6) FROM t"); err != nil {
+		t.Errorf("6 values of 3000 bytes: %v", err)
+	}
+	if _, err := ss.query("SELECT 'x' IN (SELECT v FROM s WHERE s.k = t.a) FROM t"); !errors.Is(err, ErrMemory) {
+		t.Errorf("8 values of 3000 bytes: %v", err)
+	}
+}

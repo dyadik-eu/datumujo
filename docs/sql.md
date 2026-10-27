@@ -1,6 +1,6 @@
 # The SQL of datumujo
 
-This is the SQL of stage 2 and of the parts of stage 3 that are done.
+This is the SQL of stages 2 and 3.
 It says what the SQL has, how its values behave, and its limits. The requirements are
 L-1 to L-12, L-13 for DEFAULT, L-14 for CHECK, L-15 for UNIQUE, L-16 for subqueries, L-17 for ON CONFLICT and L-18 for EXPLAIN, in [requirements.md](requirements.md). Each difference to SQLite is in the
 oracle table there. How the parts work is in [design.md](design.md).
@@ -347,29 +347,38 @@ the columns of its table.
 ## Limits
 
 Each limit has a test that the last value that fits passes and the
-first that does not fails. The tests are `TestLimits` in
-`internal/sqlexec`, and `TestDepth` and `TestErrors` in
-`internal/sqlparse`.
+first that does not fails. The tests are `TestLimits` and
+`TestLimitsOfStage3` in `internal/sqlexec`, and `TestDepth` and
+`TestErrors` in `internal/sqlparse`.
 
 | Limit | Value |
 |---|---|
 | a name of a table, column or index | 255 bytes of UTF-8 |
 | columns of a table | 1024, the hidden key of a table without PRIMARY KEY included |
-| indexes of a table | 64 |
+| indexes of a table | 64, each UNIQUE included |
 | the key form of a primary key | 1000 bytes at a page size of 4096; a TEXT key of 998 bytes |
 | an index entry | 1000 bytes: the index columns, then the key |
-| the name of the index of a UNIQUE | 255 bytes, so a table name of at most 245 bytes for `_unique_1` |
+| the name of the index of a UNIQUE | 255 bytes, so a table name of at most 246 bytes for `_unique_1` |
 | a value outside a key | no limit of its own; the changes of a transaction are at most `Options.MaxTxBytes`, 16 MiB by default |
-| the rows a statement holds to sort, group or change, and the values of IN (SELECT ...) | `Options.QueryMemory`, 64 MiB by default |
-| nesting of expressions | 200 levels |
+| the rows a statement holds to sort, group or change, and the values of IN (SELECT ...), also in a correlated subquery | `Options.QueryMemory`, 64 MiB by default |
+| nesting of expressions | 200 levels; each subquery is a level, so 199 subqueries fit inside each other |
+| the text of all DEFAULT and CHECK of a file | no limit of its own; see below |
 | parameters | 32766 |
+
+The schema is one value. It holds the text of each DEFAULT and each
+CHECK, and each change of the schema writes it again in its
+transaction. So `Options.MaxTxBytes` bounds it. Measured with a bound
+of 1 MiB: a table with a DEFAULT of 1037305 bytes can be made. But from
+518613 bytes on, the next change of the schema fails, also a CREATE
+TABLE without a default. Keep the texts of all DEFAULT and CHECK
+together below half of the bound.
 
 The key form of a TEXT or a BLOB is its bytes plus 2 bytes of end
 mark. Each byte 0 in it takes 2 bytes. An INTEGER and a REAL take 8
 bytes, a TIMESTAMP 12, a BOOLEAN 1. A column that allows NULL takes one
 byte more in an index.
 
-## Not in stage 2
+## Not in the SQL
 
 - common table expressions, views, triggers, foreign keys
 - window functions, UNION, NATURAL and USING joins

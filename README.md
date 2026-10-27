@@ -7,7 +7,8 @@ datumujo is Esperanto for "data container".
 with a primary key, secondary and unique indexes, scans and counters. One
 writer runs while readers never wait, and there are backup and a check
 command. Stage 2 adds a core subset of SQL, a driver for `database/sql`
-and a shell. The API and the file format can still change before v1; the
+and a shell. `main` holds stage 3, which becomes v0.3.0: DEFAULT, CHECK,
+UNIQUE, subqueries, INSERT ... ON CONFLICT and EXPLAIN. The API and the file format can still change before v1; the
 roadmap says what v1.0 promises.
 
 ## Versions

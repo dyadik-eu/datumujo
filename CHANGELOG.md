@@ -41,6 +41,9 @@ the API and the file format can change in any release.
   it with `Query`, `Session.Script`, `database/sql` or the shell. See
   "Explain" in [docs/sql.md](docs/sql.md).
 - `datumujo check` and `Stats.FormatVersion` report the format version.
+- A limit in docs/sql.md for the text of all DEFAULT and CHECK of a
+  file. Each change of the schema writes all of it again, so it must
+  stay below about half of `Options.MaxTxBytes`.
 
 ### Changed
 
@@ -53,6 +56,9 @@ the API and the file format can change in any release.
 
 ### Fixed
 
+- docs/sql.md gave 245 bytes as the longest table name with a UNIQUE.
+  It is 246: the name of its index, with `_unique_1`, is then 255
+  bytes.
 - The scalar `min` and `max` could panic, as `min(?1, FALSE, 0)` did
   with `?1` = FALSE. A parameter came first, and two later arguments
   had known types that do not compare. Such a call is now an error

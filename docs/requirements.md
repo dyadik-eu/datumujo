@@ -67,7 +67,7 @@ This is rule 10 of the house rules: a silent failure invents a value.
 | P-1 | Crash test: a simulated power loss after each write system call of a workload. After each one, T-4 and I-2 hold. |
 | P-2 | Fuzz tests for every function that reads the file format. |
 | P-3 | Damage test: flip bits in a file. The database reports each flipped page (I-1) and returns no wrong row. |
-| P-4 | Stage 2 uses SQLite as the test oracle for SQL results, in tests only. |
+| P-4 | Stages 2 and 3 use SQLite as the test oracle for SQL results, in tests only. |
 | P-5 | Measured load: the metadata of real projects. The first target is the two in-toto repositories from bauplan B-50: 83 and 177 issues, 390 and 776 pull requests, and 1064 and 2159 issue comments. |
 
 ## Design constraints
@@ -115,11 +115,19 @@ full-text search and replication.
 
 ### The oracle
 
-P-4 names SQLite as the test oracle. Each form of statement in L-1 and
-L-2 runs in datumujo and in the `sqlite3` program, and the results must
-be the same. The oracle runs in tests only, as a separate program, so S-2
-holds. A test that needs the oracle and does not find it fails in CI; it
-does not skip.
+P-4 names SQLite as the test oracle. Each form of statement in L-1,
+L-2 and L-13 to L-17 runs in datumujo and in the `sqlite3` program. The
+results must be the same.
+
+Each form has an oracle test of its own.
+`TestMixedAgainstSQLite` runs the forms of stage 2 in one script, and
+`TestStage3AgainstSQLite` runs those of stage 3 with them. EXPLAIN
+(L-18) has no oracle test, since its rows differ from SQLite on
+purpose.
+
+The oracle runs in tests only, as a separate program, so S-2 holds. A
+test that needs the oracle and does not find it fails in CI; it does
+not skip.
 
 Where SQL differs on purpose (L-3), the test states the difference:
 
