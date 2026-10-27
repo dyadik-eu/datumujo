@@ -72,6 +72,26 @@ under "Stage 3". The rules of the stages before hold.
 
 Stage 3 is tagged as v0.3.0.
 
+# Roadmap, stage 4: v0.4
+
+The requirements are L-20 to L-25 in [requirements.md](requirements.md),
+under "Stage 4: speed". The rules of the stages before hold. The
+benchmark comes before the changes for speed, so that each of them can
+show what it gives.
+
+| Step | Content | Closes |
+|---|---|---|
+| 36 | Requirements and this roadmap | |
+| 37 | A statement compiles in linear time: a test with n and 2n terms, then the fix | L-21 |
+| 38 | The benchmark suite against SQLite, with the results of v0.3.0 as the baseline | L-20 (basis) |
+| 39 | ORDER BY with LIMIT keeps only the rows of the limit | L-22 |
+| 40 | Prepared statements that keep their plan, in the API and the driver | L-23 |
+| 41 | ANALYZE: the statistics, where they are in the file, and how the planner reads them | L-24 |
+| 42 | The order of the tables of an INNER JOIN by cost | L-25 |
+| 43 | The oracle over the plans that statistics give; the results of the benchmark for v0.4.0; the limits in docs/sql.md | L-20, P-4 |
+
+Stage 4 is tagged as v0.4.0 when step 43 is done.
+
 # Towards v1.0
 
 Decided on 2026-09-28: stable before broad. The release v1.0 promises a
@@ -116,22 +136,9 @@ v1.0" above.
 
 ## v0.4: speed
 
-- Statistics for the planner: rows of each table and distinct values of
-  each index, kept by ANALYZE.
-- The order of the tables of a join, by the cost that the statistics
-  give.
-- A sort of ORDER BY with LIMIT that keeps only the rows of the limit.
-- A sort past the memory bound, if the benchmark shows that programs
-  need it.
-- Prepared statements that keep their plan, in the API and the driver.
-- A benchmark suite against SQLite in the repository, with its results
-  for each release.
-
-Open decisions:
-
-- the workloads of the benchmark
-- whether a sort may write a temporary file next to the database; D-1
-  allows the database file and its log only
+The steps are in "Roadmap, stage 4" above. Both open decisions were
+made on 2026-10-27, see "Stage 4: speed" in
+[requirements.md](requirements.md).
 
 ## v0.5: the format for 1.x
 

@@ -203,3 +203,27 @@ stage 2. The requirements of stages 1 and 2 hold.
 
 Not in stage 3: views, triggers, foreign keys, window functions,
 common table expressions and UNION. They are candidates for 1.x.
+
+## Stage 4: speed
+
+Decided on 2026-10-27: v0.4 makes the SQL of stages 2 and 3 faster and
+measures it. It adds no new SQL form except ANALYZE. Each result stays
+the same as before, and the oracle of P-4 shows it. The requirements of
+the stages before hold.
+
+| ID | Requirement |
+|---|---|
+| L-20 | A benchmark suite in the repository runs fixed workloads in SQLite and here, on the same data. The workloads are: insert in bulk, a lookup by key and by index, a range by key and by index, a join, GROUP BY, ORDER BY with LIMIT, and writes in many small transactions. Each workload compares its result with the result of SQLite before it reports a time. Each release puts its results in the repository. |
+| L-21 | The time to parse and compile a statement grows linearly with its length. A test measures a statement of n terms and one of 2n terms. |
+| L-22 | ORDER BY with LIMIT holds only the rows of the limit and of OFFSET, and the memory bound of L-10 counts only these. |
+| L-23 | A prepared statement keeps its plan, in the API and in the driver. A change of the schema makes it plan again before its next run. |
+| L-24 | ANALYZE [table] keeps the number of rows of each table and the number of distinct values of the leading columns of each index. The planner uses them. A file without statistics gives the plans of v0.3. |
+| L-25 | With statistics, the planner chooses the order of the tables of an INNER JOIN by cost. A LEFT JOIN keeps the order of the text. EXPLAIN shows the order. |
+
+Decided on 2026-10-27: a sort writes no temporary file, so D-1 holds.
+A sort past the memory bound fails with `ErrQueryMemory`, as in stage 2.
+The decision is open again if the benchmark shows that programs need a
+sort on disk.
+
+Where the statistics are in the file is decided in their step. If it
+changes the file format, the rule of L-19 holds for the new version.
