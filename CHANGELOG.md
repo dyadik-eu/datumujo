@@ -4,7 +4,11 @@ Each release lists what a program that uses datumujo must know: new
 functions, changes to the API or to the file format, and fixes. Before v1,
 the API and the file format can change in any release.
 
-## Unreleased
+## v0.3.0, 2026-10-27
+
+Stage 3: SQL for programs, steps 26 to 35 of
+[docs/roadmap.md](docs/roadmap.md). The SQL and its limits are in
+[docs/sql.md](docs/sql.md).
 
 ### Added
 

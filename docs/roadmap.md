@@ -70,7 +70,7 @@ under "Stage 3". The rules of the stages before hold.
 | 34 | EXPLAIN, in the API, the driver and the shell | L-18 |
 | 35 | The oracle over all new forms, mixed with the forms of stage 2; docs/sql.md; the limits of the new forms | P-4 |
 
-Stage 3 is tagged as v0.3.0 when step 35 is done.
+Stage 3 is tagged as v0.3.0.
 
 # Towards v1.0
 
