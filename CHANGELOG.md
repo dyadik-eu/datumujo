@@ -53,9 +53,23 @@ the API and the file format can change in any release.
 - With GROUP BY, a key that is one column is found however it is
   written: `SELECT t.a FROM t GROUP BY a` works now. Before, it failed
   with "column t.a must be in GROUP BY".
+- A chain of operators of one level prints in one pair of parentheses:
+  `(a + b - c)` instead of `((a + b) - c)`. This is the text of an
+  expression in a message, in EXPLAIN, in a column name and in the
+  checks of `Table.Checks`. It parses to the same tree.
 
 ### Fixed
 
+- A CHECK with a chain of more than 200 terms, such as a long sum, made
+  its table unusable. CREATE TABLE took it, and each INSERT and UPDATE
+  failed with "stored content is damaged". The text of the check had a
+  pair of parentheses for each operator, and the parser refuses more
+  than 200 levels. No release wrote such a check, because CHECK is new
+  in this release.
+- The compile of a statement took time in the square of its length,
+  and its allocations grew with the cube. A sum of 1000 terms took
+  192 ms and 1.07 GB, one of 20000 terms more than ten minutes. Now it
+  is linear: 0.7 ms and 0.36 MB for 1000 terms.
 - docs/sql.md gave 245 bytes as the longest table name with a UNIQUE.
   It is 246: the name of its index, with `_unique_1`, is then 255
   bytes.
