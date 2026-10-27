@@ -357,7 +357,7 @@ func (c *compiler) inSelect(x *sqlparse.In, a node) (node, error) {
 	if len(cols) != 1 {
 		return node{}, errAt(x.Select.At, "IN takes a subquery of one column, and %s gives %d", sub.text, len(cols))
 	}
-	b := node{typ: cols[0].Type, known: cols[0].Known, at: x.Select.At, desc: sub.text}
+	b := node{typ: cols[0].Type, known: cols[0].Known, at: x.Select.At, src: &sqlparse.Subquery{Select: x.Select}}
 	if err := comparableNodes(a, b, "IN"); err != nil {
 		return node{}, err
 	}

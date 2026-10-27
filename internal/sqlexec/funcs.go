@@ -139,7 +139,7 @@ func init() {
 			case string:
 				b, ok := vals[1].(string)
 				if !ok {
-					return nil, errAt(args[1].at, "instr: %s is BLOB and %s is TEXT; they must have one type", args[1].desc, args[0].desc)
+					return nil, errAt(args[1].at, "instr: %s is BLOB and %s is TEXT; they must have one type", args[1].desc(), args[0].desc())
 				}
 				i := strings.Index(a, b)
 				if i < 0 {
@@ -149,7 +149,7 @@ func init() {
 			case []byte:
 				b, ok := vals[1].([]byte)
 				if !ok {
-					return nil, errAt(args[1].at, "instr: %s is TEXT and %s is BLOB; they must have one type", args[1].desc, args[0].desc)
+					return nil, errAt(args[1].at, "instr: %s is TEXT and %s is BLOB; they must have one type", args[1].desc(), args[0].desc())
 				}
 				return int64(bytes.Index(a, b) + 1), nil
 			}

@@ -30,8 +30,19 @@ type node struct {
 	typ   table.Type
 	known bool
 	at    sqlparse.At
-	desc  string // the expression as SQL, for messages
+	src   sqlparse.Expr // the expression, printed by desc for messages
 	eval  evalFn
+}
+
+// desc prints the expression of the node as SQL, for a message. It
+// prints only when a message needs it. Each node of a chain of n terms
+// holds a tree of up to n terms. A text for each node at compile time
+// costs time in n squared.
+func (n node) desc() string {
+	if n.src == nil {
+		return ""
+	}
+	return n.src.String()
 }
 
 // Resolver finds a column for a name: its place in the row and its type.
@@ -117,7 +128,7 @@ func want(n node, what string, allowed ...table.Type) error {
 			return nil
 		}
 	}
-	return errAt(n.at, "%s needs %s, and %s is %s", what, typeList(allowed), n.desc, TypeName(n.typ))
+	return errAt(n.at, "%s needs %s, and %s is %s", what, typeList(allowed), n.desc(), TypeName(n.typ))
 }
 
 // check is want at run time, for a value of a node whose type was not
@@ -132,7 +143,7 @@ func check(n node, v any, what string, allowed ...table.Type) error {
 			return nil
 		}
 	}
-	return errAt(n.at, "%s needs %s, and %s is %s", what, typeList(allowed), n.desc, TypeName(t))
+	return errAt(n.at, "%s needs %s, and %s is %s", what, typeList(allowed), n.desc(), TypeName(t))
 }
 
 func typeList(ts []table.Type) string {
@@ -151,7 +162,7 @@ var numbers = []table.Type{table.Int64, table.Float64}
 // comparableNodes checks before the run that two nodes can compare.
 func comparableNodes(a, b node, what string) error {
 	if a.known && b.known && !comparable(a.typ, b.typ) {
-		return errAt(b.at, "%s: %s is %s and %s is %s; they do not compare", what, a.desc, TypeName(a.typ), b.desc, TypeName(b.typ))
+		return errAt(b.at, "%s: %s is %s and %s is %s; they do not compare", what, a.desc(), TypeName(a.typ), b.desc(), TypeName(b.typ))
 	}
 	return nil
 }
@@ -164,7 +175,7 @@ func comparableValues(a, b node, x, y any, what string) error {
 	tx, _ := typeOf(x)
 	ty, _ := typeOf(y)
 	if !comparable(tx, ty) {
-		return errAt(b.at, "%s: %s is %s and %s is %s; they do not compare", what, a.desc, TypeName(tx), b.desc, TypeName(ty))
+		return errAt(b.at, "%s: %s is %s and %s is %s; they do not compare", what, a.desc(), TypeName(tx), b.desc(), TypeName(ty))
 	}
 	return nil
 }
@@ -183,7 +194,7 @@ func same(ns []node, what string) (node, error) {
 			continue
 		}
 		if n.typ != first.typ {
-			return node{}, errAt(n.at, "%s: %s is %s and %s is %s; they must have one type", what, first.desc, TypeName(first.typ), n.desc, TypeName(n.typ))
+			return node{}, errAt(n.at, "%s: %s is %s and %s is %s; they must have one type", what, first.desc(), TypeName(first.typ), n.desc(), TypeName(n.typ))
 		}
 	}
 	if first == nil {
@@ -204,7 +215,7 @@ func conform(n node, t node, what string) node {
 			return v, err
 		}
 		if vt, _ := typeOf(v); vt != t.typ {
-			return nil, errAt(n.at, "%s: %s is %s, want %s", what, n.desc, TypeName(vt), TypeName(t.typ))
+			return nil, errAt(n.at, "%s: %s is %s, want %s", what, n.desc(), TypeName(vt), TypeName(t.typ))
 		}
 		return v, nil
 	}
@@ -216,7 +227,7 @@ func (c *compiler) expr(e sqlparse.Expr) (node, error) {
 	if err != nil {
 		return node{}, err
 	}
-	n.at, n.desc = e.Pos(), e.String()
+	n.at, n.src = e.Pos(), e
 	return n, nil
 }
 
