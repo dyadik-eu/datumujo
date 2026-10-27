@@ -56,7 +56,7 @@ func TestInSubquery(t *testing.T) {
 		msg       string
 	}{
 		{"SELECT 1 IN (SELECT a, s FROM t)", nil, 1, 14, "IN takes a subquery of one column, and (SELECT a, s FROM t) gives 2"},
-		{"SELECT 1 IN (SELECT s FROM t)", nil, 1, 14, "do not compare"},
+		{"SELECT 1 IN (SELECT s FROM t)", nil, 1, 14, "IN: 1 is INTEGER and (SELECT s FROM t) is TEXT; they do not compare"},
 		{"SELECT 1 FROM e WHERE 1 IN (SELECT s FROM t)", nil, 1, 29, "do not compare"},
 		// A type known only at run time: x, or the values of the set.
 		{"SELECT ? IN (SELECT s FROM t)", []any{int64(1)}, 1, 14, "do not compare"},

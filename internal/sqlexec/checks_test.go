@@ -129,3 +129,20 @@ func TestCheckDamaged(t *testing.T) {
 		}
 	}
 }
+
+// TestLongCheck: a CHECK of a chain longer than MaxDepth works. The
+// schema keeps the text of a check, and each INSERT and UPDATE parses
+// it again. That text must parse, so a chain prints in one pair of
+// parentheses, not in one pair for each operator.
+func TestLongCheck(t *testing.T) {
+	ss := newSession(t, store.Options{})
+	sum := strings.TrimSuffix(strings.Repeat("a + ", 2*sqlparse.MaxDepth), " + ")
+	ss.must("CREATE TABLE t (a INTEGER CHECK (" + sum + " > 0))")
+	ss.commit()
+	ss.must("INSERT INTO t VALUES (1)")
+	failsAt(t, ss, "INSERT INTO t VALUES (-1)", 1, 23, "of table t is false", ErrCheck)
+	ss.must("UPDATE t SET a = 2")
+	if got, want := ss.dump("t"), "1 2\n"; got != want {
+		t.Errorf("t:\n%s\nwant\n%s", got, want)
+	}
+}
