@@ -80,7 +80,16 @@ func TestPrecedence(t *testing.T) {
 	for _, c := range []struct{ src, want string }{
 		{"1 + 2 * 3", "(1 + (2 * 3))"},
 		{"1 * 2 + 3", "((1 * 2) + 3)"},
-		{"1 - 2 - 3", "((1 - 2) - 3)"},
+		// A chain of one level prints in one pair of parentheses. The
+		// parser reads it from the left, so a group on the right keeps its
+		// own pair.
+		{"1 - 2 - 3", "(1 - 2 - 3)"},
+		{"1 - (2 - 3)", "(1 - (2 - 3))"},
+		{"1 + 2 - 3 * 4 / 5", "(1 + 2 - (3 * 4 / 5))"},
+		{"a OR b OR c AND d", "(a OR b OR (c AND d))"},
+		{"(a || b) || c", "(a || b || c)"},
+		{"1 < 2 <= 3 > 4", "(1 < 2 <= 3 > 4)"},
+		{"a = b IS NULL != c LIKE d", "(a = b IS NULL != c LIKE d)"},
 		{"a || b * c", "((a || b) * c)"},
 		{"-a || b", "((- a) || b)"},
 		{"-5 * 2", "(-5 * 2)"},
@@ -96,7 +105,7 @@ func TestPrecedence(t *testing.T) {
 		{"a == b", "(a = b)"},
 		{"a <> b", "(a != b)"},
 		{"a IS NOT NULL", "(a IS NOT NULL)"},
-		{"a IS NULL = b", "((a IS NULL) = b)"},
+		{"a IS NULL = b", "(a IS NULL = b)"},
 		{"a NOT LIKE 'x%'", "(a NOT LIKE 'x%')"},
 		{"a BETWEEN 1 AND 2 + 3", "(a BETWEEN 1 AND (2 + 3))"},
 		{"a NOT BETWEEN b AND c AND d", "((a NOT BETWEEN b AND c) AND d)"},

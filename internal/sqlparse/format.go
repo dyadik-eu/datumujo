@@ -9,7 +9,8 @@ import (
 
 // The String methods print a tree as SQL that parses to the same tree.
 // Every operator gets parentheses, so the text shows how the parser
-// grouped it.
+// grouped it. A chain of operators of one level, such as a + b + c, is
+// the exception: it gets one pair, see Binary.
 
 // softWords are words the parser knows by their place. A name with such
 // a word gets double quotes, so it cannot be read as the word.
@@ -105,8 +106,39 @@ func (e *Unary) String() string {
 	return "(" + e.Op + " " + x + ")"
 }
 
+// chainLevels are the levels of the binary operators. The parser reads
+// the operators of each level from the left, in a loop. A left operand
+// with an operator of the same level is a part of the same chain. Each
+// operator of a Binary that the parser makes is in the map.
+var chainLevels = map[string]int{
+	"OR": 1, "AND": 2,
+	"=": 3, "!=": 3, "IS": 3, "IS NOT": 3, "LIKE": 3, "NOT LIKE": 3,
+	"<": 4, "<=": 4, ">": 4, ">=": 4,
+	"+": 5, "-": 5, "*": 6, "/": 6, "%": 6, "||": 7,
+}
+
+// String prints a chain of one level, such as a + b + c, in one pair of
+// parentheses. The parser reads the chain in a loop, so its tree is as
+// deep as the chain is long. With a pair for each level, the parser
+// refuses the text past MaxDepth. A print that joins the text of each
+// level anew takes time in the square of the length.
+// Any other operand that is itself deep needs parentheses in the text,
+// so MaxDepth bounds it.
 func (e *Binary) String() string {
-	return "(" + e.L.String() + " " + e.Op + " " + e.R.String() + ")"
+	var b strings.Builder
+	b.WriteByte('(')
+	e.chain(&b)
+	b.WriteByte(')')
+	return b.String()
+}
+
+func (e *Binary) chain(b *strings.Builder) {
+	if l, ok := e.L.(*Binary); ok && chainLevels[l.Op] == chainLevels[e.Op] {
+		l.chain(b)
+	} else {
+		b.WriteString(e.L.String())
+	}
+	b.WriteString(" " + e.Op + " " + e.R.String())
 }
 
 func not(n bool) string {
